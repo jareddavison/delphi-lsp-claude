@@ -1,0 +1,20 @@
+# dcc64 build intermediates
+obj/
+*.dcu
+*.o
+*.identcache
+*.tvsconfig
+*.local
+
+# Delphi IDE backups
+__history/
+__recovery/
+*.~*
+
+# Shim diagnostic logs
+*.log
+
+# OS / editor cruft
+Thumbs.db
+.DS_Store
+*.swp
