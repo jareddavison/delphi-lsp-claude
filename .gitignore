@@ -6,6 +6,9 @@ obj/
 *.tvsconfig
 *.local
 
+# Renamed-aside exe when rebuilding while the shim is running
+*.exe.inuse
+
 # Delphi IDE backups
 __history/
 __recovery/

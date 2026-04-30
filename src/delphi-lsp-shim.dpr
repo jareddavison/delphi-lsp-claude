@@ -33,6 +33,7 @@ uses
   System.Classes,
   System.IOUtils,
   System.JSON,
+  System.SyncObjs,
   System.Generics.Collections,
   System.Generics.Defaults;
 
@@ -60,6 +61,21 @@ type
     constructor Create(AFromChild, AToClient: TLspStream);
   end;
 
+  // Watches the per-session sentinel directory for `active.txt`/`reload.flag`
+  // changes (slash commands deposit them) and refires `didChangeConfiguration`
+  // / triggers recycle as appropriate.
+  TSentinelWatcherThread = class(TThread)
+  private
+    FDir: string;
+    FShutdownEvent: TEvent;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(const ADir: string);
+    destructor Destroy; override;
+    procedure SignalShutdown;
+  end;
+
 var
   GLogPath: string;
   GShimToChild: TLspStream;
@@ -69,6 +85,10 @@ var
   GChildHandle: THandle;
   GSettingsUri: string;
   GDidFireConfig: Boolean;
+  GChildInLock: TCriticalSection;        // serializes writes to child stdin
+  GActiveSettingsLock: TCriticalSection; // guards GSettingsUri reads/writes
+  GSessionDir: string;                   // ${CLAUDE_PLUGIN_DATA}/sessions/<PID>/
+  GActiveSentinelPath: string;           // <session>/active.txt
 
 procedure Diag(const Msg: string);
 var
@@ -414,6 +434,203 @@ begin
   end;
 end;
 
+{ Child-stdin write helpers + sentinel handling }
+
+// All writes to the child's stdin must funnel through this so the main
+// reader thread, sentinel watcher, and any other future writer don't
+// interleave Content-Length-framed JSON-RPC messages.
+procedure SafeWriteToChild(const Json: string);
+begin
+  GChildInLock.Acquire;
+  try
+    if GShimToChild <> nil then
+      GShimToChild.WriteMessage(Json);
+  finally
+    GChildInLock.Release;
+  end;
+end;
+
+// Apply a new `.delphilsp.json` path: convert to file URI, update
+// `GSettingsUri`, and fire `workspace/didChangeConfiguration` if init
+// has already completed. If init hasn't completed yet, the new path
+// is simply remembered so RunProxy fires it on `initialized`.
+procedure ApplyActiveSettings(const NewPath: string);
+var
+  NewUri, CurUri: string;
+  AlreadyFired: Boolean;
+begin
+  if NewPath = '' then Exit;
+  if not FileExists(NewPath) then
+  begin
+    Diag('Sentinel pointed at non-existent file: ' + NewPath);
+    Exit;
+  end;
+  NewUri := PathToFileUri(NewPath);
+  GActiveSettingsLock.Acquire;
+  try
+    CurUri := GSettingsUri;
+    if NewUri = CurUri then
+    begin
+      Diag('Sentinel: same path, no-op');
+      Exit;
+    end;
+    GSettingsUri := NewUri;
+    AlreadyFired := GDidFireConfig;
+  finally
+    GActiveSettingsLock.Release;
+  end;
+  if AlreadyFired then
+  begin
+    SafeWriteToChild(MakeDidChangeConfigJson(NewUri));
+    Diag('Switched project via sentinel: ' + NewUri);
+  end
+  else
+    Diag('Sentinel updated path before init complete; will be applied on initialized');
+end;
+
+procedure ReadAndApplySentinel;
+var
+  ContentLines: TStringList;
+  Path: string;
+begin
+  if (GActiveSentinelPath = '') or not FileExists(GActiveSentinelPath) then Exit;
+  ContentLines := TStringList.Create;
+  try
+    try
+      ContentLines.LoadFromFile(GActiveSentinelPath, TEncoding.UTF8);
+    except
+      on E: Exception do
+      begin
+        Diag('Sentinel read failed: ' + E.Message);
+        Exit;
+      end;
+    end;
+    if ContentLines.Count = 0 then Exit;
+    Path := Trim(ContentLines[0]);
+    if Path <> '' then ApplyActiveSettings(Path);
+  finally
+    ContentLines.Free;
+  end;
+end;
+
+procedure RegisterSession;
+var
+  Base, WorkspaceFile: string;
+  WS: TStringList;
+begin
+  // Prefer CLAUDE_PLUGIN_DATA when Claude Code exports it; fall back to
+  // %LOCALAPPDATA%\delphi-lsp-claude so slash commands have a deterministic
+  // path to find us regardless of plugin-install layout. Both sides of the
+  // shim/slash-command divide must resolve to the same dir, so the fallback
+  // chain has to match in both places.
+  Base := GetEnv('CLAUDE_PLUGIN_DATA', '');
+  if Base = '' then
+  begin
+    Base := GetEnv('LOCALAPPDATA', '');
+    if Base <> '' then
+      Base := IncludeTrailingPathDelimiter(Base) + 'delphi-lsp-claude';
+  end;
+  if Base = '' then
+  begin
+    Diag('No usable data dir; running without per-session sentinel');
+    Exit;
+  end;
+  GSessionDir := IncludeTrailingPathDelimiter(Base) + 'sessions' + PathDelim +
+                 IntToStr(GetCurrentProcessId);
+  GActiveSentinelPath := IncludeTrailingPathDelimiter(GSessionDir) + 'active.txt';
+  try
+    if not ForceDirectories(GSessionDir) then
+    begin
+      Diag('ForceDirectories failed: ' + GSessionDir);
+      GSessionDir := ''; GActiveSentinelPath := '';
+      Exit;
+    end;
+    WorkspaceFile := IncludeTrailingPathDelimiter(GSessionDir) + 'workspace.txt';
+    WS := TStringList.Create;
+    try
+      WS.Add(GetCurrentDir);
+      WS.SaveToFile(WorkspaceFile, TEncoding.UTF8);
+    finally
+      WS.Free;
+    end;
+    Diag('Registered session at ' + GSessionDir);
+  except
+    on E: Exception do
+    begin
+      Diag('Session registration failed: ' + E.Message);
+      GSessionDir := ''; GActiveSentinelPath := '';
+    end;
+  end;
+end;
+
+procedure UnregisterSession;
+begin
+  if GSessionDir = '' then Exit;
+  try
+    TDirectory.Delete(GSessionDir, True);
+  except
+    // best effort; an orphaned session dir is harmless
+  end;
+end;
+
+{ TSentinelWatcherThread }
+
+constructor TSentinelWatcherThread.Create(const ADir: string);
+begin
+  FDir := ADir;
+  FShutdownEvent := TEvent.Create(nil, True, False, '');
+  inherited Create(False);
+end;
+
+destructor TSentinelWatcherThread.Destroy;
+begin
+  FShutdownEvent.Free;
+  inherited;
+end;
+
+procedure TSentinelWatcherThread.SignalShutdown;
+begin
+  FShutdownEvent.SetEvent;
+end;
+
+procedure TSentinelWatcherThread.Execute;
+var
+  ChangeHandle: THandle;
+  Handles: array[0..1] of THandle;
+  WaitResult: DWORD;
+begin
+  if FDir = '' then Exit;
+  ChangeHandle := FindFirstChangeNotification(PChar(FDir), False,
+    FILE_NOTIFY_CHANGE_LAST_WRITE or FILE_NOTIFY_CHANGE_FILE_NAME);
+  if ChangeHandle = INVALID_HANDLE_VALUE then
+  begin
+    Diag('Sentinel watcher: FindFirstChangeNotification failed for ' + FDir);
+    Exit;
+  end;
+  try
+    Handles[0] := ChangeHandle;
+    Handles[1] := FShutdownEvent.Handle;
+    while not Terminated do
+    begin
+      WaitResult := WaitForMultipleObjects(2, @Handles[0], False, INFINITE);
+      if WaitResult = WAIT_OBJECT_0 then
+      begin
+        try
+          ReadAndApplySentinel;
+        except
+          on E: Exception do Diag('Sentinel callback error: ' + E.Message);
+        end;
+        FindNextChangeNotification(ChangeHandle);
+      end
+      else if WaitResult = WAIT_OBJECT_0 + 1 then
+        Break;
+    end;
+  finally
+    FindCloseChangeNotification(ChangeHandle);
+  end;
+  Diag('Sentinel watcher exiting');
+end;
+
 { Child-reader thread: drains DelphiLSP -> our stdout }
 
 constructor TChildReaderThread.Create(AFromChild, AToClient: TLspStream);
@@ -506,7 +723,7 @@ end;
 procedure RunProxy;
 var
   Reader: TChildReaderThread;
-  Json, Method: string;
+  Json, Method, UriToFire: string;
 begin
   Reader := TChildReaderThread.Create(GChildToShim, GShimToClient);
   try
@@ -517,13 +734,25 @@ begin
       Method := GetMessageMethod(Json);
       if Method = 'initialize' then
         Json := InjectInitOptions(Json);
-      if not GShimToChild.WriteMessage(Json) then Break;
-      if (Method = 'initialized') and (not GDidFireConfig) and (GSettingsUri <> '') then
+      SafeWriteToChild(Json);
+      if Method = 'initialized' then
       begin
-        if GShimToChild.WriteMessage(MakeDidChangeConfigJson(GSettingsUri)) then
+        GActiveSettingsLock.Acquire;
+        try
+          if (not GDidFireConfig) and (GSettingsUri <> '') then
+          begin
+            UriToFire := GSettingsUri;
+            GDidFireConfig := True;
+          end
+          else
+            UriToFire := '';
+        finally
+          GActiveSettingsLock.Release;
+        end;
+        if UriToFire <> '' then
         begin
-          GDidFireConfig := True;
-          Diag('Sent didChangeConfiguration: ' + GSettingsUri);
+          SafeWriteToChild(MakeDidChangeConfigJson(UriToFire));
+          Diag('Sent didChangeConfiguration: ' + UriToFire);
         end;
       end;
     end;
@@ -551,14 +780,26 @@ end;
 
 var
   ChildIn, ChildOut: THandle;
+  SentinelWatcher: TSentinelWatcherThread;
 begin
   GLogPath := GetEnv('DELPHI_LSP_SHIM_LOG', '');
   Diag('--- delphi-lsp-shim starting ---');
   Diag('CWD: ' + GetCurrentDir);
 
+  GChildInLock := TCriticalSection.Create;
+  GActiveSettingsLock := TCriticalSection.Create;
+  SentinelWatcher := nil;
+
   try
     InitSettings;
-    Diag('Settings URI: ' + GSettingsUri);
+    Diag('Initial settings URI (auto-discovered): ' + GSettingsUri);
+
+    RegisterSession;
+    // If a sentinel was already deposited before our spawn (e.g., the user
+    // ran /delphi-project before this shim started up), pick it up now so
+    // our initial `didChangeConfiguration` fires with the right URI.
+    ReadAndApplySentinel;
+    Diag('Effective settings URI: ' + GSettingsUri);
 
     if not StartChild(GChildHandle, ChildIn, ChildOut) then
     begin
@@ -571,9 +812,21 @@ begin
     GClientToShim  := TLspStream.Create(GetStdHandle(STD_INPUT_HANDLE));
     GShimToClient  := TLspStream.Create(GetStdHandle(STD_OUTPUT_HANDLE));
 
+    if GSessionDir <> '' then
+    begin
+      SentinelWatcher := TSentinelWatcherThread.Create(GSessionDir);
+      SentinelWatcher.FreeOnTerminate := False;
+    end;
+
     try
       RunProxy;
     finally
+      if SentinelWatcher <> nil then
+      begin
+        SentinelWatcher.SignalShutdown;
+        SentinelWatcher.WaitFor;
+        SentinelWatcher.Free;
+      end;
       // Close our side of the child stdin to signal EOF
       CloseHandle(ChildIn);
       if WaitForSingleObject(GChildHandle, 2000) = WAIT_TIMEOUT then
@@ -585,6 +838,8 @@ begin
       GChildToShim.Free;
       GClientToShim.Free;
       GShimToClient.Free;
+
+      UnregisterSession;
     end;
   except
     on E: Exception do
@@ -594,4 +849,7 @@ begin
       Halt(1);
     end;
   end;
+
+  GChildInLock.Free;
+  GActiveSettingsLock.Free;
 end.
