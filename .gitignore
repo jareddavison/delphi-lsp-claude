@@ -19,6 +19,15 @@ __history/
 __recovery/
 *.~*
 
+# IDE-generated LSP settings file — encodes per-machine RAD Studio install
+# paths (DCU dirs, search paths to <BDS>\source\..., third-party libs at
+# user-specific locations). Each developer regenerates locally by opening
+# the .dproj in RAD Studio and saving (with the
+# Tools → Options → ... → Save .delphilsp.json file when project is saved
+# IDE option enabled). The .dproj itself IS committed — it's portable.
+*.delphilsp.json
+*.dproj.local
+
 # Shim diagnostic logs
 *.log
 

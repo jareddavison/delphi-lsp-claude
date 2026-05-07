@@ -1,4 +1,4 @@
-program delphi_lsp_shim;
+﻿program delphi_lsp_shim;
 
 {$APPTYPE CONSOLE}
 
