@@ -181,8 +181,10 @@ var
   GSession: TLspSession;              // session-scoped state (streams, child, open docs, init cache)
   GProjectGuard: TObject;             // TMonitor sentinel for GActiveProject access
   GActiveProject: TActiveProject;     // current project (replaceable)
-  GSessionDir: string;                // ${CLAUDE_PLUGIN_DATA}/sessions/<PID>/
+  GSessionDir: string;                // ${CLAUDE_PLUGIN_DATA}/sessions/<PID>/ (per-shim-process, dies with shim)
   GActiveSentinelPath: string;        // <session>/active.txt
+  GClaudeSessionId: string;           // CLAUDE_CODE_SESSION_ID — stable across resume, '' if absent
+  GSessionStatePath: string;          // ${CLAUDE_PLUGIN_DATA}/session-state/<claude-session-id>.json — sticky bindings, survives shim death
 
 procedure Diag(const Msg: string);
 var
@@ -1241,6 +1243,10 @@ begin
   end;
 end;
 
+// Forward decls — sticky-pick helpers live further down (grouped with other
+// plugin-data resolution), but SwitchToProject below needs to call them.
+procedure WriteStickyForCwd(const Cwd, SettingsPath: string); forward;
+
 // Replace the active project. Frees the old TActiveProject (which stops
 // its watcher) and constructs a new one with its own watcher and seeded
 // content hash. Fires `didChangeConfiguration` for the new URI if init
@@ -1278,6 +1284,10 @@ begin
   // Free outside the guard — we own the only ref now and freeing involves
   // joining the watcher thread, which can take a moment.
   if Old <> nil then Old.Free;
+  // Persist as sticky so a restart of this same Claude session lands here
+  // without prompting. Must come AFTER the in-memory swap so a partial sticky
+  // write doesn't outlive a failed switch.
+  WriteStickyForCwd(GetCurrentDir, NewPath);
   if ShouldFire then
   begin
     GSession.WriteToChild(MakeDidChangeConfigJson(NewUri));
@@ -1413,23 +1423,190 @@ begin
     Diag(Format('Orphan GC: removed %d stale session dir(s)', [Removed]));
 end;
 
+// Plugin-data base used by both the per-PID sessions/ tree (sentinel files) and
+// the per-claude-session-id session-state/ tree (sticky bindings). Slash commands
+// resolve this with the same fallback chain so both sides agree.
+function ResolvePluginDataBase: string;
+begin
+  Result := GetEnv('CLAUDE_PLUGIN_DATA', '');
+  if Result = '' then
+  begin
+    Result := GetEnv('LOCALAPPDATA', '');
+    if Result <> '' then
+      Result := IncludeTrailingPathDelimiter(Result) + 'delphi-lsp-claude';
+  end;
+end;
+
+// Canonicalize a workspace path for hashing: lowercase (Windows), trim trailing
+// delimiter. Two shim processes spawned in the same directory must produce the
+// same hash regardless of casing or trailing slash.
+function NormalizeCwd(const Cwd: string): string;
+begin
+  Result := ExcludeTrailingPathDelimiter(LowerCase(Cwd));
+end;
+
+// Read the sticky pick for the current cwd from the per-claude-session-id
+// bindings file. Returns the absolute .delphilsp.json path if a valid entry
+// exists AND the file still exists on disk; '' otherwise. Survives shim death
+// because it lives outside the per-PID sessions/ tree.
+function ReadStickyForCwd(const Cwd: string): string;
+var
+  Content, CwdHash, Path: string;
+  Root, EntryVal, PathVal: TJSONValue;
+  Entry: TJSONObject;
+begin
+  Result := '';
+  if (GSessionStatePath = '') or (not FileExists(GSessionStatePath)) then Exit;
+  try
+    Content := TFile.ReadAllText(GSessionStatePath, TEncoding.UTF8);
+  except
+    on E: Exception do
+    begin
+      Diag('Sticky read failed: ' + E.Message);
+      Exit;
+    end;
+  end;
+  CwdHash := THashSHA2.GetHashString(NormalizeCwd(Cwd), SHA256);
+  Root := nil;
+  try
+    try
+      Root := TJSONObject.ParseJSONValue(Content);
+    except
+      on E: Exception do
+      begin
+        Diag('Sticky parse failed: ' + E.Message);
+        Exit;
+      end;
+    end;
+    if not (Root is TJSONObject) then Exit;
+    EntryVal := TJSONObject(Root).GetValue(CwdHash);
+    if not (EntryVal is TJSONObject) then Exit;
+    Entry := TJSONObject(EntryVal);
+    PathVal := Entry.GetValue('settingsFile');
+    if (PathVal = nil) then Exit;
+    Path := PathVal.Value;
+    if (Path <> '') and FileExists(Path) then
+      Result := Path
+    else if Path <> '' then
+      Diag('Sticky pick references missing file (ignored): ' + Path);
+  finally
+    Root.Free;
+  end;
+end;
+
+// Persist a sticky pick for (current claude session, given cwd). Atomically
+// updates the bindings file via tmp+MoveFileEx so a concurrent reader never
+// sees a half-written file. No-op if session id wasn't available (shim wasn't
+// spawned by Claude Code, or the env var wasn't propagated).
+procedure WriteStickyForCwd(const Cwd, SettingsPath: string);
+var
+  Root: TJSONObject;
+  ExistingVal: TJSONValue;
+  ExistingPair: TJSONPair;
+  Entry: TJSONObject;
+  CwdHash, Content, Dir, TmpPath, Json: string;
+  Bytes: TBytes;
+  FS: TFileStream;
+begin
+  if (GSessionStatePath = '') or (Cwd = '') or (SettingsPath = '') then Exit;
+  CwdHash := THashSHA2.GetHashString(NormalizeCwd(Cwd), SHA256);
+
+  Root := nil;
+  try
+    if FileExists(GSessionStatePath) then
+    begin
+      try
+        Content := TFile.ReadAllText(GSessionStatePath, TEncoding.UTF8);
+        ExistingVal := TJSONObject.ParseJSONValue(Content);
+        if ExistingVal is TJSONObject then
+          Root := TJSONObject(ExistingVal)
+        else if ExistingVal <> nil then
+          ExistingVal.Free;
+      except
+        on E: Exception do
+          Diag('Sticky read-for-update failed: ' + E.Message);
+      end;
+    end;
+    if Root = nil then Root := TJSONObject.Create;
+
+    ExistingPair := Root.RemovePair(CwdHash);
+    if ExistingPair <> nil then ExistingPair.Free;
+    Entry := TJSONObject.Create;
+    Entry.AddPair('settingsFile', SettingsPath);
+    Entry.AddPair('cwd', Cwd);
+    Entry.AddPair('lastUsed', FormatDateTime('yyyy-mm-dd"T"hh:nn:ss"Z"', Now));
+    Root.AddPair(CwdHash, Entry);
+
+    Dir := ExtractFilePath(GSessionStatePath);
+    try
+      ForceDirectories(Dir);
+    except
+      on E: Exception do
+      begin
+        Diag('Sticky dir create failed: ' + E.Message);
+        Exit;
+      end;
+    end;
+
+    Json := Root.ToJSON;
+    TmpPath := GSessionStatePath + '.tmp';
+    try
+      Bytes := TEncoding.UTF8.GetBytes(Json);
+      FS := TFileStream.Create(TmpPath, fmCreate);
+      try
+        if Length(Bytes) > 0 then
+          FS.WriteBuffer(Bytes[0], Length(Bytes));
+      finally
+        FS.Free;
+      end;
+    except
+      on E: Exception do
+      begin
+        Diag('Sticky tmp write failed: ' + E.Message);
+        Exit;
+      end;
+    end;
+    if not MoveFileEx(PChar(TmpPath), PChar(GSessionStatePath),
+                      MOVEFILE_REPLACE_EXISTING) then
+      Diag(Format('Sticky MoveFileEx failed: %d', [GetLastError]))
+    else
+      Diag(Format('Sticky pick saved: cwd=%s settings=%s', [Cwd, SettingsPath]));
+  finally
+    Root.Free;
+  end;
+end;
+
+// Resolve the sticky-bindings file path from CLAUDE_CODE_SESSION_ID + plugin-data
+// base. Called once at startup before InitSettings so InitSettings can consult
+// sticky as part of its resolution chain.
+procedure InitSessionState;
+var
+  Base: string;
+begin
+  GClaudeSessionId := GetEnv('CLAUDE_CODE_SESSION_ID', '');
+  if GClaudeSessionId = '' then
+  begin
+    Diag('CLAUDE_CODE_SESSION_ID not set; cross-session sticky disabled');
+    Exit;
+  end;
+  Base := ResolvePluginDataBase;
+  if Base = '' then
+  begin
+    Diag('No plugin-data base; cross-session sticky disabled');
+    Exit;
+  end;
+  GSessionStatePath := IncludeTrailingPathDelimiter(Base) + 'session-state' +
+                       PathDelim + GClaudeSessionId + '.json';
+  Diag('Claude session id: ' + GClaudeSessionId);
+  Diag('Session state path: ' + GSessionStatePath);
+end;
+
 procedure RegisterSession;
 var
   Base, SessionsRoot, WorkspaceFile: string;
   WS: TStringList;
 begin
-  // Prefer CLAUDE_PLUGIN_DATA when Claude Code exports it; fall back to
-  // %LOCALAPPDATA%\delphi-lsp-claude so slash commands have a deterministic
-  // path to find us regardless of plugin-install layout. Both sides of the
-  // shim/slash-command divide must resolve to the same dir, so the fallback
-  // chain has to match in both places.
-  Base := GetEnv('CLAUDE_PLUGIN_DATA', '');
-  if Base = '' then
-  begin
-    Base := GetEnv('LOCALAPPDATA', '');
-    if Base <> '' then
-      Base := IncludeTrailingPathDelimiter(Base) + 'delphi-lsp-claude';
-  end;
+  Base := ResolvePluginDataBase;
   if Base = '' then
   begin
     Diag('No usable data dir; running without per-session sentinel');
@@ -1835,26 +2012,62 @@ begin
   Diag('Client closed stdin');
 end;
 
-// Establish the initial active project from `DELPHI_LSP_SETTINGS` env var
-// (explicit override) or by auto-discovering the shallowest .delphilsp.json
-// under the workspace root. Runs before any worker threads start, so no
-// guard needed.
+// Establish the initial active project. Resolution order:
+//   1. DELPHI_LSP_SETTINGS env var (explicit override)
+//   2. Sticky pick for (claude-session-id, cwd) if present and still on disk
+//   3. Single-candidate auto-pick (only when there's exactly one .delphilsp.json
+//      in the workspace — trivial-case convenience)
+//   4. None — shim starts without a project. DelphiLSP runs syntactic-only
+//      until /delphi-project picks one. Multi-candidate workspaces always
+//      land here, since auto-picking from filesystem shape misfires too often
+//      in the real-world case (100-project repo with shared .pas units).
+// Runs before any worker threads start, so no guard needed.
 procedure InitSettings;
 var
-  Explicit, Found: string;
+  Explicit, Sticky: string;
+  Acc: TList<string>;
+  I: Integer;
 begin
   Explicit := GetEnv('DELPHI_LSP_SETTINGS', '');
   if (Explicit <> '') and FileExists(Explicit) then
   begin
     GActiveProject := TActiveProject.Create(Explicit);
     GActiveProject.StartWatcher;
+    Diag('Initial settings URI (env DELPHI_LSP_SETTINGS): ' + GActiveProject.Uri);
     Exit;
   end;
-  Found := FindSettingsFile(GetCurrentDir);
-  if Found <> '' then
+
+  Sticky := ReadStickyForCwd(GetCurrentDir);
+  if Sticky <> '' then
   begin
-    GActiveProject := TActiveProject.Create(Found);
+    GActiveProject := TActiveProject.Create(Sticky);
     GActiveProject.StartWatcher;
+    Diag('Restored sticky pick from previous session: ' + GActiveProject.Uri +
+         ' — /delphi-project to change');
+    Exit;
+  end;
+
+  Acc := TList<string>.Create;
+  try
+    CollectSettingsFiles(GetCurrentDir, 0, Acc);
+    if Acc.Count = 0 then
+    begin
+      Diag('No .delphilsp.json found in workspace');
+      Exit;
+    end;
+    if Acc.Count = 1 then
+    begin
+      GActiveProject := TActiveProject.Create(Acc[0]);
+      GActiveProject.StartWatcher;
+      Diag('Initial settings URI (single candidate): ' + GActiveProject.Uri);
+      WriteStickyForCwd(GetCurrentDir, Acc[0]);
+      Exit;
+    end;
+    Diag(Format('Multiple .delphilsp.json candidates (%d); shim starts without project — user must run /delphi-project', [Acc.Count]));
+    for I := 0 to Acc.Count - 1 do
+      Diag('  candidate: ' + Acc[I]);
+  finally
+    Acc.Free;
   end;
 end;
 
@@ -1871,11 +2084,8 @@ begin
   SentinelWatcher := nil;
 
   try
+    InitSessionState;
     InitSettings;
-    if GActiveProject <> nil then
-      Diag('Initial settings URI (auto-discovered): ' + GActiveProject.Uri)
-    else
-      Diag('Initial settings URI: (none discovered)');
 
     RegisterSession;
     // If a sentinel was already deposited before our spawn (e.g., the user
