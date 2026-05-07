@@ -822,7 +822,11 @@ procedure TActiveProject.Invalidate;
 begin
   TMonitor.Enter(Self);
   try
-    FInvalidated := True;
+    if not FInvalidated then
+    begin
+      FInvalidated := True;
+      Diag('Active file watcher: invalidated ' + FPath);
+    end;
   finally
     TMonitor.Exit(Self);
   end;
@@ -841,6 +845,7 @@ begin
     begin
       // Couldn't read (transient mid-write?). Leave the flag set so the
       // next inbound LSP message retries the hash.
+      Diag('Active file hash read failed; leaving invalidated for retry');
       Exit;
     end;
     FInvalidated := False;
@@ -848,7 +853,9 @@ begin
     begin
       FLastHash := NewHash;
       Result := True;
-    end;
+    end
+    else
+      Diag('Active file invalidation cleared: hash unchanged (no-op write)');
   finally
     TMonitor.Exit(Self);
   end;
