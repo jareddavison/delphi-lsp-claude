@@ -2408,14 +2408,18 @@ begin
     GSession.SendToChild(Json, Method);
     if Method = 'initialized' then
     begin
+      // Mark init complete unconditionally — even if no project is selected
+      // yet (multi-candidate / no sticky). Otherwise a later SwitchToProject
+      // would think init hasn't happened and stage the didChangeConfiguration
+      // for "next initialized", which never fires again.
       UriToFire := '';
       TMonitor.Enter(GProjectGuard);
       try
-        P := GActiveProject;
-        if (not GSession.DidFireConfig) and (P <> nil) then
+        if not GSession.DidFireConfig then
         begin
-          UriToFire := P.Uri;
           GSession.DidFireConfig := True;
+          P := GActiveProject;
+          if P <> nil then UriToFire := P.Uri;
         end;
       finally
         TMonitor.Exit(GProjectGuard);
