@@ -34,6 +34,7 @@ uses
   System.IOUtils,
   System.JSON,
   System.SyncObjs,
+  System.Hash,
   System.Generics.Collections,
   System.Generics.Defaults;
 
@@ -76,6 +77,49 @@ type
     procedure SignalShutdown;
   end;
 
+  // Forward declaration — TActiveProject and TActiveFileWatcherThread
+  // reference each other (project owns watcher; watcher holds back-ptr to
+  // project so it can call Invalidate on the right object).
+  TActiveProject = class;
+
+  // Watches the directory containing the active `.delphilsp.json` (non-recursive)
+  // and on any `LAST_WRITE`/`FILE_NAME`/`SIZE` notification calls
+  // `Project.Invalidate`. The actual file read+hash comparison happens lazily
+  // in the main proxy loop — see TActiveProject.CheckAndConsumeIfChanged.
+  TActiveFileWatcherThread = class(TThread)
+  private
+    FProject: TActiveProject;  // back-pointer; not owned
+    FDir: string;
+    FShutdownEvent: TEvent;
+  protected
+    procedure Execute; override;
+  public
+    constructor Create(AProject: TActiveProject; const ADir: string);
+    destructor Destroy; override;
+    procedure SignalShutdown;
+  end;
+
+  // Encapsulates everything tied to one specific `.delphilsp.json`. Replacing
+  // the active project (`/delphi-project` switch) is just constructing a new
+  // TActiveProject and freeing the old one — its watcher dies with it.
+  TActiveProject = class
+  private
+    FPath: string;
+    FUri: string;
+    FLastHash: string;
+    FInvalidated: Boolean;
+    FWatcher: TActiveFileWatcherThread;
+    function ComputeHash: string;
+  public
+    constructor Create(const APath: string);
+    destructor Destroy; override;
+    procedure StartWatcher;
+    procedure Invalidate;                       // called from watcher thread
+    function CheckAndConsumeIfChanged: Boolean; // true => content actually changed since last seen
+    property Path: string read FPath;
+    property Uri: string read FUri;
+  end;
+
 var
   GLogPath: string;
   GShimToChild: TLspStream;
@@ -83,12 +127,12 @@ var
   GClientToShim: TLspStream;
   GShimToClient: TLspStream;
   GChildHandle: THandle;
-  GSettingsUri: string;
-  GDidFireConfig: Boolean;
-  GChildInLock: TCriticalSection;        // serializes writes to child stdin
-  GActiveSettingsLock: TCriticalSection; // guards GSettingsUri reads/writes
-  GSessionDir: string;                   // ${CLAUDE_PLUGIN_DATA}/sessions/<PID>/
-  GActiveSentinelPath: string;           // <session>/active.txt
+  GDidFireConfig: Boolean;            // guarded by GProjectGuard
+  GChildInLock: TCriticalSection;     // serializes writes to child stdin
+  GProjectGuard: TObject;             // TMonitor sentinel for GActiveProject access
+  GActiveProject: TActiveProject;     // current project (replaceable)
+  GSessionDir: string;                // ${CLAUDE_PLUGIN_DATA}/sessions/<PID>/
+  GActiveSentinelPath: string;        // <session>/active.txt
 
 procedure Diag(const Msg: string);
 var
@@ -450,42 +494,82 @@ begin
   end;
 end;
 
-// Apply a new `.delphilsp.json` path: convert to file URI, update
-// `GSettingsUri`, and fire `workspace/didChangeConfiguration` if init
-// has already completed. If init hasn't completed yet, the new path
-// is simply remembered so RunProxy fires it on `initialized`.
-procedure ApplyActiveSettings(const NewPath: string);
+// Replace the active project. Frees the old TActiveProject (which stops
+// its watcher) and constructs a new one with its own watcher and seeded
+// content hash. Fires `didChangeConfiguration` for the new URI if init
+// has already completed; otherwise the new URI is fired on `initialized`.
+procedure SwitchToProject(const NewPath: string);
 var
-  NewUri, CurUri: string;
-  AlreadyFired: Boolean;
+  Old, NewProj: TActiveProject;
+  ShouldFire: Boolean;
+  NewUri: string;
 begin
   if NewPath = '' then Exit;
   if not FileExists(NewPath) then
   begin
-    Diag('Sentinel pointed at non-existent file: ' + NewPath);
+    Diag('SwitchToProject: file does not exist: ' + NewPath);
     Exit;
   end;
-  NewUri := PathToFileUri(NewPath);
-  GActiveSettingsLock.Acquire;
+
+  Old := nil;
+  ShouldFire := False;
+  NewUri := '';
+  TMonitor.Enter(GProjectGuard);
   try
-    CurUri := GSettingsUri;
-    if NewUri = CurUri then
+    if (GActiveProject <> nil) and SameText(GActiveProject.Path, NewPath) then
     begin
-      Diag('Sentinel: same path, no-op');
+      Diag('SwitchToProject: same path, no-op');
       Exit;
     end;
-    GSettingsUri := NewUri;
-    AlreadyFired := GDidFireConfig;
+    Old := GActiveProject;
+    NewProj := TActiveProject.Create(NewPath);
+    NewProj.StartWatcher;
+    GActiveProject := NewProj;
+    ShouldFire := GDidFireConfig;
+    NewUri := NewProj.Uri;
   finally
-    GActiveSettingsLock.Release;
+    TMonitor.Exit(GProjectGuard);
   end;
-  if AlreadyFired then
+  // Free outside the guard — we own the only ref now and freeing involves
+  // joining the watcher thread, which can take a moment.
+  if Old <> nil then Old.Free;
+  if ShouldFire then
   begin
     SafeWriteToChild(MakeDidChangeConfigJson(NewUri));
-    Diag('Switched project via sentinel: ' + NewUri);
+    Diag('Switched project: ' + NewUri);
   end
   else
-    Diag('Sentinel updated path before init complete; will be applied on initialized');
+    Diag('Project switched before init complete; will fire on initialized: ' + NewUri);
+end;
+
+// Called from the main proxy loop before forwarding each inbound message:
+// if the active file's watcher marked it invalidated, hash the file now
+// and re-fire `didChangeConfiguration` only if the content actually changed.
+procedure CheckAndApplyInvalidation;
+var
+  P: TActiveProject;
+  Uri: string;
+  Changed: Boolean;
+begin
+  Changed := False;
+  Uri := '';
+  TMonitor.Enter(GProjectGuard);
+  try
+    P := GActiveProject;
+    if (P = nil) or (not GDidFireConfig) then Exit;
+    if P.CheckAndConsumeIfChanged then
+    begin
+      Changed := True;
+      Uri := P.Uri;
+    end;
+  finally
+    TMonitor.Exit(GProjectGuard);
+  end;
+  if Changed then
+  begin
+    SafeWriteToChild(MakeDidChangeConfigJson(Uri));
+    Diag('Re-fired didChangeConfiguration after content change: ' + Uri);
+  end;
 end;
 
 procedure ReadAndApplySentinel;
@@ -507,7 +591,7 @@ begin
     end;
     if ContentLines.Count = 0 then Exit;
     Path := Trim(ContentLines[0]);
-    if Path <> '' then ApplyActiveSettings(Path);
+    if Path <> '' then SwitchToProject(Path);
   finally
     ContentLines.Free;
   end;
@@ -631,6 +715,177 @@ begin
   Diag('Sentinel watcher exiting');
 end;
 
+{ TActiveFileWatcherThread }
+
+constructor TActiveFileWatcherThread.Create(AProject: TActiveProject; const ADir: string);
+begin
+  FProject := AProject;
+  FDir := ADir;
+  FShutdownEvent := TEvent.Create(nil, True, False, '');
+  inherited Create(False);
+end;
+
+destructor TActiveFileWatcherThread.Destroy;
+begin
+  FShutdownEvent.Free;
+  inherited;
+end;
+
+procedure TActiveFileWatcherThread.SignalShutdown;
+begin
+  FShutdownEvent.SetEvent;
+end;
+
+procedure TActiveFileWatcherThread.Execute;
+var
+  ChangeHandle: THandle;
+  Handles: array[0..1] of THandle;
+  WaitResult: DWORD;
+begin
+  if (FDir = '') or (not DirectoryExists(FDir)) then
+  begin
+    Diag('ActiveFileWatcher: dir missing, skipping: ' + FDir);
+    Exit;
+  end;
+  ChangeHandle := FindFirstChangeNotification(PChar(FDir), False,
+    FILE_NOTIFY_CHANGE_LAST_WRITE or FILE_NOTIFY_CHANGE_FILE_NAME or FILE_NOTIFY_CHANGE_SIZE);
+  if ChangeHandle = INVALID_HANDLE_VALUE then
+  begin
+    Diag(Format('ActiveFileWatcher: FindFirstChangeNotification failed for %s (gle=%d)',
+      [FDir, GetLastError]));
+    Exit;
+  end;
+  try
+    Handles[0] := ChangeHandle;
+    Handles[1] := FShutdownEvent.Handle;
+    while not Terminated do
+    begin
+      WaitResult := WaitForMultipleObjects(2, @Handles[0], False, INFINITE);
+      if WaitResult = WAIT_OBJECT_0 then
+      begin
+        // Just mark invalidated; the main proxy loop hashes lazily on the
+        // next inbound LSP message and decides whether to re-fire.
+        try
+          if FProject <> nil then FProject.Invalidate;
+        except
+          on E: Exception do Diag('ActiveFileWatcher invalidate error: ' + E.Message);
+        end;
+        FindNextChangeNotification(ChangeHandle);
+      end
+      else if WaitResult = WAIT_OBJECT_0 + 1 then
+        Break;
+    end;
+  finally
+    FindCloseChangeNotification(ChangeHandle);
+  end;
+  Diag('ActiveFileWatcher exiting for ' + FDir);
+end;
+
+{ TActiveProject }
+
+constructor TActiveProject.Create(const APath: string);
+begin
+  inherited Create;
+  FPath := APath;
+  FUri := PathToFileUri(APath);
+  FLastHash := ComputeHash;
+  FInvalidated := False;
+end;
+
+destructor TActiveProject.Destroy;
+begin
+  if FWatcher <> nil then
+  begin
+    FWatcher.SignalShutdown;
+    FWatcher.WaitFor;
+    FWatcher.Free;
+    FWatcher := nil;
+  end;
+  inherited;
+end;
+
+procedure TActiveProject.StartWatcher;
+var
+  Dir: string;
+begin
+  if FWatcher <> nil then Exit; // already started
+  Dir := ExtractFilePath(FPath);
+  if Dir = '' then Exit;
+  // Strip the trailing path delimiter — FindFirstChangeNotification
+  // accepts paths with or without it, but `DirectoryExists` is happier
+  // with the canonical form.
+  Dir := ExcludeTrailingPathDelimiter(Dir);
+  FWatcher := TActiveFileWatcherThread.Create(Self, Dir);
+end;
+
+procedure TActiveProject.Invalidate;
+begin
+  TMonitor.Enter(Self);
+  try
+    FInvalidated := True;
+  finally
+    TMonitor.Exit(Self);
+  end;
+end;
+
+function TActiveProject.CheckAndConsumeIfChanged: Boolean;
+var
+  NewHash: string;
+begin
+  Result := False;
+  TMonitor.Enter(Self);
+  try
+    if not FInvalidated then Exit;
+    NewHash := ComputeHash;
+    if NewHash = '' then
+    begin
+      // Couldn't read (transient mid-write?). Leave the flag set so the
+      // next inbound LSP message retries the hash.
+      Exit;
+    end;
+    FInvalidated := False;
+    if NewHash <> FLastHash then
+    begin
+      FLastHash := NewHash;
+      Result := True;
+    end;
+  finally
+    TMonitor.Exit(Self);
+  end;
+end;
+
+function TActiveProject.ComputeHash: string;
+var
+  FS: TFileStream;
+  Hasher: THashSHA2;
+  Buf: TBytes;
+  Got: Integer;
+begin
+  Result := '';
+  if not FileExists(FPath) then Exit;
+  try
+    FS := TFileStream.Create(FPath, fmOpenRead or fmShareDenyNone);
+    try
+      Hasher := THashSHA2.Create(SHA256);
+      SetLength(Buf, 8192);
+      repeat
+        Got := FS.Read(Buf[0], Length(Buf));
+        if Got > 0 then
+          Hasher.Update(Buf, Got);
+      until Got <= 0;
+      Result := Hasher.HashAsString;
+    finally
+      FS.Free;
+    end;
+  except
+    on E: Exception do
+    begin
+      Diag('ComputeHash failed for ' + FPath + ': ' + E.Message);
+      Result := '';
+    end;
+  end;
+end;
+
 { Child-reader thread: drains DelphiLSP -> our stdout }
 
 constructor TChildReaderThread.Create(AFromChild, AToClient: TLspStream);
@@ -724,6 +979,7 @@ procedure RunProxy;
 var
   Reader: TChildReaderThread;
   Json, Method, UriToFire: string;
+  P: TActiveProject;
 begin
   Reader := TChildReaderThread.Create(GChildToShim, GShimToClient);
   try
@@ -731,23 +987,29 @@ begin
     while True do
     begin
       if not GClientToShim.ReadMessage(Json) then Break;
+
+      // Lazy hash check: if the active-file watcher marked the project
+      // invalidated, hash now and re-fire didChangeConfiguration only if
+      // the content actually changed.
+      CheckAndApplyInvalidation;
+
       Method := GetMessageMethod(Json);
       if Method = 'initialize' then
         Json := InjectInitOptions(Json);
       SafeWriteToChild(Json);
       if Method = 'initialized' then
       begin
-        GActiveSettingsLock.Acquire;
+        UriToFire := '';
+        TMonitor.Enter(GProjectGuard);
         try
-          if (not GDidFireConfig) and (GSettingsUri <> '') then
+          P := GActiveProject;
+          if (not GDidFireConfig) and (P <> nil) then
           begin
-            UriToFire := GSettingsUri;
+            UriToFire := P.Uri;
             GDidFireConfig := True;
-          end
-          else
-            UriToFire := '';
+          end;
         finally
-          GActiveSettingsLock.Release;
+          TMonitor.Exit(GProjectGuard);
         end;
         if UriToFire <> '' then
         begin
@@ -764,18 +1026,27 @@ begin
   end;
 end;
 
+// Establish the initial active project from `DELPHI_LSP_SETTINGS` env var
+// (explicit override) or by auto-discovering the shallowest .delphilsp.json
+// under the workspace root. Runs before any worker threads start, so no
+// guard needed.
 procedure InitSettings;
 var
   Explicit, Found: string;
 begin
   Explicit := GetEnv('DELPHI_LSP_SETTINGS', '');
-  if Explicit <> '' then
+  if (Explicit <> '') and FileExists(Explicit) then
   begin
-    if FileExists(Explicit) then GSettingsUri := PathToFileUri(Explicit);
+    GActiveProject := TActiveProject.Create(Explicit);
+    GActiveProject.StartWatcher;
     Exit;
   end;
   Found := FindSettingsFile(GetCurrentDir);
-  if Found <> '' then GSettingsUri := PathToFileUri(Found);
+  if Found <> '' then
+  begin
+    GActiveProject := TActiveProject.Create(Found);
+    GActiveProject.StartWatcher;
+  end;
 end;
 
 var
@@ -787,19 +1058,25 @@ begin
   Diag('CWD: ' + GetCurrentDir);
 
   GChildInLock := TCriticalSection.Create;
-  GActiveSettingsLock := TCriticalSection.Create;
+  GProjectGuard := TObject.Create;
   SentinelWatcher := nil;
 
   try
     InitSettings;
-    Diag('Initial settings URI (auto-discovered): ' + GSettingsUri);
+    if GActiveProject <> nil then
+      Diag('Initial settings URI (auto-discovered): ' + GActiveProject.Uri)
+    else
+      Diag('Initial settings URI: (none discovered)');
 
     RegisterSession;
     // If a sentinel was already deposited before our spawn (e.g., the user
     // ran /delphi-project before this shim started up), pick it up now so
     // our initial `didChangeConfiguration` fires with the right URI.
     ReadAndApplySentinel;
-    Diag('Effective settings URI: ' + GSettingsUri);
+    if GActiveProject <> nil then
+      Diag('Effective settings URI: ' + GActiveProject.Uri)
+    else
+      Diag('Effective settings URI: (none)');
 
     if not StartChild(GChildHandle, ChildIn, ChildOut) then
     begin
@@ -839,6 +1116,19 @@ begin
       GClientToShim.Free;
       GShimToClient.Free;
 
+      // Free the active project (which stops its watcher) before tearing
+      // down the guard sentinel.
+      TMonitor.Enter(GProjectGuard);
+      try
+        if GActiveProject <> nil then
+        begin
+          GActiveProject.Free;
+          GActiveProject := nil;
+        end;
+      finally
+        TMonitor.Exit(GProjectGuard);
+      end;
+
       UnregisterSession;
     end;
   except
@@ -851,5 +1141,5 @@ begin
   end;
 
   GChildInLock.Free;
-  GActiveSettingsLock.Free;
+  GProjectGuard.Free;
 end.
