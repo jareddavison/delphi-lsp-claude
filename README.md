@@ -92,6 +92,7 @@ Cleanup:
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
 | `DELPHI_LSP_EXE` | *(auto-detect)* | Path or PATH name of `DelphiLSP.exe`. Highest BDS version is auto-resolved via registry; this overrides. |
+| `DELPHI_LSP_BITS` | *(prefer 64)* | Force a specific DelphiLSP variant when both `<install>\bin64\` and `<install>\bin\` exist. `32` selects 32-bit, `64` selects 64-bit (fails loudly if missing rather than falling back), unset selects 64-then-32. Doesn't apply when `DELPHI_LSP_EXE` is set explicitly. |
 | `DELPHI_LSP_LOG_MODES` | `0` | Bitmask passed to `-LogModes`. |
 | `DELPHI_LSP_SERVER_TYPE` | `controller` | `controller` \| `agent` \| `linter` (controller spawns sub-process agents; non-controller modes don't push diagnostics). |
 | `DELPHI_LSP_AGENT_COUNT` | `2` | 1 or 2 (controller mode only; ≥2 enables Error Insight push diagnostics). |

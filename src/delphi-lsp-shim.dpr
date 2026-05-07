@@ -432,20 +432,46 @@ end;
 // keys there on x64 Windows), then the bare HKLM, then HKCU. Returns
 // '' if not found. Result has its trailing path delimiter stripped for
 // consistent concatenation by callers.
-// Pick the DelphiLSP.exe to spawn from a given BDS install root. Prefers
-// `bin64\DelphiLSP.exe` when present (64-bit native, faster + larger address
-// space). Falls back to `bin\DelphiLSP.exe` (32-bit) — that's all SKU's that
-// don't ship the 64-bit toolchain (e.g. older or lower-tier RAD Studio
-// editions). Returns '' if neither exists. Caller decides whether to use it.
+// Pick the DelphiLSP.exe to spawn from a given BDS install root. Default
+// behaviour: prefer `bin64\DelphiLSP.exe` (64-bit native, faster + larger
+// address space; ships in higher-tier SKUs), fall back to `bin\DelphiLSP.exe`
+// (32-bit, all SKUs).
+//
+// Override via env var DELPHI_LSP_BITS:
+//   DELPHI_LSP_BITS=32 — only consider 32-bit (e.g. when the 64-bit binary
+//                       has a bug specific to a project's compiler defines).
+//   DELPHI_LSP_BITS=64 — only consider 64-bit (fail loudly if missing
+//                       instead of silently falling back).
+//   (unset/empty/other) — default 64-then-32 fallback.
+//
+// Returns '' if no candidate satisfies the preference. Caller decides what
+// to do — usually fall through to the next resolution rule.
 function FindDelphiLspExeUnder(const BdsRoot: string): string;
 var
-  Bin64Path, Bin32Path: string;
+  Bin64Path, Bin32Path, Pref: string;
 begin
   Result := '';
   if BdsRoot = '' then Exit;
   Bin64Path := IncludeTrailingPathDelimiter(BdsRoot) + 'bin64\DelphiLSP.exe';
-  if FileExists(Bin64Path) then Exit(Bin64Path);
   Bin32Path := IncludeTrailingPathDelimiter(BdsRoot) + 'bin\DelphiLSP.exe';
+  Pref := Trim(GetEnv('DELPHI_LSP_BITS', ''));
+  if Pref = '32' then
+  begin
+    if FileExists(Bin32Path) then
+      Exit(Bin32Path)
+    else
+      Diag('DELPHI_LSP_BITS=32 but 32-bit DelphiLSP.exe not found under ' + BdsRoot);
+    Exit;
+  end;
+  if Pref = '64' then
+  begin
+    if FileExists(Bin64Path) then
+      Exit(Bin64Path)
+    else
+      Diag('DELPHI_LSP_BITS=64 but 64-bit DelphiLSP.exe not found under ' + BdsRoot);
+    Exit;
+  end;
+  if FileExists(Bin64Path) then Exit(Bin64Path);
   if FileExists(Bin32Path) then Exit(Bin32Path);
 end;
 
