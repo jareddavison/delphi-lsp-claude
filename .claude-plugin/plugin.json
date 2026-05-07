@@ -9,6 +9,8 @@
   "lspServers": {
     "delphilsp": {
       "command": "${CLAUDE_PLUGIN_ROOT}/bin/delphi-lsp-shim.exe",
+      "restartOnCrash": true,
+      "maxRestarts": 5,
       "extensionToLanguage": {
         ".pas": "objectpascal",
         ".inc": "objectpascal",

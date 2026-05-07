@@ -1365,17 +1365,20 @@ begin
   if GSessionDir = '' then Exit;
   FlagPath := IncludeTrailingPathDelimiter(GSessionDir) + 'shim-reload.flag';
   if not FileExists(FlagPath) then Exit;
-  Diag('Shim-reload flag detected — exiting for fresh spawn');
+  Diag('Shim-reload flag detected — exiting non-zero so restartOnCrash respawns us');
   try
     DeleteFile(FlagPath);
   except
     on E: Exception do Diag('Shim-reload flag delete failed: ' + E.Message);
   end;
-  // Halt skips main-thread destructors but nothing critical needs flushing —
-  // diag log writes are flushed per Writeln (Append + CloseFile pattern in
-  // Diag), and the per-PID session dir gets GC'd by the next shim's
-  // GcOrphanSessions sweep. The OS reclaims pipe handles.
-  Halt(0);
+  // Exit non-zero so Claude Code's LSP integration treats this as a crash and
+  // honors restartOnCrash (set in plugin.json). Empirically a clean exit
+  // (code 0) leaves Claude Code's LSP runner in a "server is running" stuck
+  // state that never respawns — only unexpected exits trigger the auto-restart.
+  // Halt skips main-thread destructors; nothing critical needs flushing
+  // (diag log writes per-line, per-PID session dir GC'd by next shim's
+  // GcOrphanSessions, OS reclaims pipe handles).
+  Halt(1);
 end;
 
 // /delphi-reload writes a sentinel file at <session>/reload.flag. The watcher
