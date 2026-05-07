@@ -1647,27 +1647,96 @@ begin
     Diag(Format('  argv[%d]=%s', [I, ParamStr(I)]));
 end;
 
+// Last-resort discovery: Claude Code stores per-session conversation logs at
+// ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl. The encoded form
+// replaces ':' and '\' with '-' (so D:\Documents\TestDproj becomes
+// D--Documents-TestDproj). Most-recently-modified .jsonl in the matching
+// project dir is the active session — its filename (sans .jsonl) is the id.
+//
+// Fallback only — Claude Code 2.1.x doesn't propagate CLAUDE_CODE_SESSION_ID
+// to LSP subprocesses (env) and ${CLAUDE_CODE_SESSION_ID} substitution in
+// manifest args isn't supported (substitution is limited to CLAUDE_PLUGIN_ROOT
+// / CLAUDE_PLUGIN_DATA). Verified 2026-05-07. If that changes, env/argv paths
+// take precedence and this function never runs. Coupled to Claude Code's
+// internal storage layout — re-verify if it stops working.
+function DiscoverSessionIdFromProjectsDir(const Cwd: string): string;
+const
+  Suffix = '.jsonl';
+var
+  Home, ProjectsRoot, EncodedCwd, ProjectDir, BestName: string;
+  SR: TSearchRec;
+  BestAge: TDateTime;
+begin
+  Result := '';
+  Home := GetEnv('USERPROFILE', '');
+  if Home = '' then Exit;
+  ProjectsRoot := IncludeTrailingPathDelimiter(Home) + '.claude' + PathDelim + 'projects';
+  if not DirectoryExists(ProjectsRoot) then Exit;
+
+  EncodedCwd := StringReplace(Cwd, ':', '-', [rfReplaceAll]);
+  EncodedCwd := StringReplace(EncodedCwd, '\', '-', [rfReplaceAll]);
+  EncodedCwd := StringReplace(EncodedCwd, '/', '-', [rfReplaceAll]);
+  ProjectDir := IncludeTrailingPathDelimiter(ProjectsRoot) + EncodedCwd;
+  if not DirectoryExists(ProjectDir) then
+  begin
+    Diag('Projects-dir scan: no dir for ' + EncodedCwd);
+    Exit;
+  end;
+
+  BestName := ''; BestAge := 0;
+  if FindFirst(IncludeTrailingPathDelimiter(ProjectDir) + '*' + Suffix, faAnyFile, SR) = 0 then
+  try
+    repeat
+      if (BestName = '') or (SR.TimeStamp > BestAge) then
+      begin
+        BestName := SR.Name;
+        BestAge := SR.TimeStamp;
+      end;
+    until FindNext(SR) <> 0;
+  finally
+    FindClose(SR);
+  end;
+
+  if BestName <> '' then
+  begin
+    Result := Copy(BestName, 1, Length(BestName) - Length(Suffix));
+    Diag(Format('Projects-dir scan: most-recent %s in %s -> session id %s',
+      [BestName, ProjectDir, Result]));
+  end
+  else
+    Diag('Projects-dir scan: no .jsonl in ' + ProjectDir);
+end;
+
 procedure InitSessionState;
 var
-  Base, FromArg: string;
+  Base, FromArg, FromScan: string;
 begin
   DumpClaudeEnv;
   DumpArgv;
   GClaudeSessionId := GetEnv('CLAUDE_CODE_SESSION_ID', '');
-  if GClaudeSessionId = '' then
+  if GClaudeSessionId <> '' then
+    Diag('Claude session id from env: ' + GClaudeSessionId)
+  else
   begin
     FromArg := ParseSessionIdFromArgv;
     if FromArg <> '' then
     begin
       GClaudeSessionId := FromArg;
       Diag('Claude session id from argv: ' + GClaudeSessionId);
+    end
+    else
+    begin
+      FromScan := DiscoverSessionIdFromProjectsDir(GetCurrentDir);
+      if FromScan <> '' then
+      begin
+        GClaudeSessionId := FromScan;
+        Diag('Claude session id from projects-dir scan: ' + GClaudeSessionId);
+      end;
     end;
-  end
-  else
-    Diag('Claude session id from env: ' + GClaudeSessionId);
+  end;
   if GClaudeSessionId = '' then
   begin
-    Diag('CLAUDE_CODE_SESSION_ID not set (env or argv); cross-session sticky disabled');
+    Diag('Claude session id unresolvable (env/argv/scan all failed); cross-session sticky disabled');
     Exit;
   end;
   Base := ResolvePluginDataBase;
