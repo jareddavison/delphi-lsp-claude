@@ -2378,6 +2378,206 @@ begin
   Diag('Child reader thread exiting');
 end;
 
+{ Hook mode (--hook-session-start) }
+
+// Drain stdin into a byte buffer. Hooks receive a small JSON object
+// (typically <2KB) on stdin, then EOF.
+function ReadAllStdin: TBytes;
+const
+  BufSize = 4096;
+var
+  StdinH: THandle;
+  Buf: array[0..BufSize - 1] of Byte;
+  Got: DWORD;
+  Total: Integer;
+begin
+  Total := 0;
+  SetLength(Result, 0);
+  StdinH := GetStdHandle(STD_INPUT_HANDLE);
+  while ReadFile(StdinH, Buf[0], BufSize, Got, nil) and (Got > 0) do
+  begin
+    SetLength(Result, Total + Integer(Got));
+    Move(Buf[0], Result[Total], Got);
+    Inc(Total, Integer(Got));
+  end;
+end;
+
+// Atomic UTF-8 file write via tmp+MoveFileEx. Same pattern WriteStickyForCwd
+// uses; pulled out as a generic helper since the hook needs it twice.
+procedure WriteFileAtomic(const Path, Content: string);
+var
+  TmpPath: string;
+  Bytes: TBytes;
+  FS: TFileStream;
+begin
+  TmpPath := Path + '.tmp';
+  Bytes := TEncoding.UTF8.GetBytes(Content);
+  try
+    FS := TFileStream.Create(TmpPath, fmCreate);
+    try
+      if Length(Bytes) > 0 then
+        FS.WriteBuffer(Bytes[0], Length(Bytes));
+    finally
+      FS.Free;
+    end;
+  except
+    on E: Exception do
+    begin
+      Diag('WriteFileAtomic tmp write failed: ' + E.Message);
+      Exit;
+    end;
+  end;
+  if not MoveFileEx(PChar(TmpPath), PChar(Path), MOVEFILE_REPLACE_EXISTING) then
+    Diag(Format('WriteFileAtomic MoveFileEx failed: %d', [GetLastError]));
+end;
+
+// Entry point for `--hook-session-start` argv mode. Reads SessionStart hook
+// payload from stdin, persists session-id correlation files, optionally
+// emits a multi-candidate prompt to stdout for Claude.
+//
+// Why this lives in the shim binary (not a separate hook script): GetParentProcessId
+// returns Claude Code's actual main PID here (the hook is a direct child of
+// Claude Code's process), whereas MinGW bash hooks were getting $PPID=1 due to
+// process tree reparenting. With the real PPID, the shim's claude-pid/<PPID>.json
+// lookup at startup hits — race-free per Claude Code instance, even with multiple
+// simultaneous sessions in the same cwd.
+procedure RunSessionStartHook;
+var
+  PayloadBytes: TBytes;
+  Payload, SessionId, Cwd, EntryJson: string;
+  Root: TJSONValue;
+  Obj: TJSONObject;
+  IdVal, CwdVal: TJSONValue;
+  Base, ClaudePidDir, PpidPath, ByIdPath: string;
+  StickyFile, Content, CwdHash: string;
+  Ppid: DWORD;
+  HasSticky: Boolean;
+  Acc: TList<string>;
+  I: Integer;
+  EntryObj: TJSONObject;
+begin
+  PayloadBytes := ReadAllStdin;
+  Payload := TEncoding.UTF8.GetString(PayloadBytes);
+  Diag('Hook: payload bytes=' + IntToStr(Length(PayloadBytes)));
+
+  SessionId := '';
+  Cwd := '';
+  Root := nil;
+  try
+    try
+      Root := TJSONObject.ParseJSONValue(Payload);
+    except
+      on E: Exception do Diag('Hook payload parse failed: ' + E.Message);
+    end;
+    if Root is TJSONObject then
+    begin
+      Obj := TJSONObject(Root);
+      IdVal := Obj.GetValue('session_id');
+      CwdVal := Obj.GetValue('cwd');
+      if IdVal <> nil then SessionId := IdVal.Value;
+      if CwdVal <> nil then Cwd := CwdVal.Value;
+    end;
+  finally
+    Root.Free;
+  end;
+
+  if SessionId = '' then
+  begin
+    Diag('Hook: no session_id in payload, bailing out');
+    Exit;
+  end;
+  if Cwd = '' then Cwd := GetCurrentDir;
+
+  Ppid := GetParentProcessId;
+  Diag(Format('Hook: pid=%d ppid=%d session=%s cwd=%s',
+    [GetCurrentProcessId, Ppid, SessionId, Cwd]));
+
+  Base := ResolvePluginDataBase;
+  if Base = '' then
+  begin
+    Diag('Hook: no plugin-data base; cannot persist');
+    Exit;
+  end;
+
+  ClaudePidDir := IncludeTrailingPathDelimiter(Base) + 'claude-pid';
+  try
+    ForceDirectories(ClaudePidDir);
+  except
+    on E: Exception do
+    begin
+      Diag('Hook: ForceDirectories failed: ' + E.Message);
+      Exit;
+    end;
+  end;
+
+  // Build the entry JSON used in both drop files.
+  EntryObj := TJSONObject.Create;
+  try
+    EntryObj.AddPair('session_id', SessionId);
+    EntryObj.AddPair('cwd', Cwd);
+    EntryObj.AddPair('hook_pid', TJSONNumber.Create(GetCurrentProcessId));
+    EntryObj.AddPair('hook_ppid', TJSONNumber.Create(Ppid));
+    EntryObj.AddPair('timestamp',
+      FormatDateTime('yyyy-mm-dd"T"hh:nn:ss"Z"', Now));
+    EntryJson := EntryObj.ToJSON;
+  finally
+    EntryObj.Free;
+  end;
+
+  // Primary: PPID-keyed. The shim's startup ReadSessionIdFromHookFile(GetParentProcessId)
+  // matches against this — race-free per Claude Code instance.
+  PpidPath := IncludeTrailingPathDelimiter(ClaudePidDir) + IntToStr(Ppid) + '.json';
+  WriteFileAtomic(PpidPath, EntryJson);
+
+  // Fallback: by-id-<session>.json. The shim's by-id+cwd scan uses this if
+  // PPID-keyed lookup misses (shouldn't happen now, but defensive).
+  ByIdPath := IncludeTrailingPathDelimiter(ClaudePidDir) +
+              'by-id-' + SessionId + '.json';
+  WriteFileAtomic(ByIdPath, EntryJson);
+
+  Diag(Format('Hook: wrote %s and %s', [PpidPath, ByIdPath]));
+
+  // Multi-candidate prompt: only if no sticky AND >1 .delphilsp.json files.
+  StickyFile := IncludeTrailingPathDelimiter(Base) + 'session-state' +
+                PathDelim + SessionId + '.json';
+  CwdHash := THashSHA2.GetHashString(NormalizeCwd(Cwd), SHA256);
+  HasSticky := False;
+  if FileExists(StickyFile) then
+  begin
+    try
+      Content := TFile.ReadAllText(StickyFile, TEncoding.UTF8);
+      if Pos('"' + CwdHash + '"', Content) > 0 then HasSticky := True;
+    except
+      on E: Exception do Diag('Hook sticky-check failed: ' + E.Message);
+    end;
+  end;
+
+  if HasSticky then
+  begin
+    Diag('Hook: sticky exists for this cwd, staying silent');
+    Exit;
+  end;
+
+  Acc := TList<string>.Create;
+  try
+    CollectSettingsFiles(Cwd, 0, Acc);
+    Diag(Format('Hook: sticky=no candidates=%d', [Acc.Count]));
+    if Acc.Count > 1 then
+    begin
+      Writeln(Format(
+        'The DelphiLSP plugin found %d .delphilsp.json projects in this workspace and no sticky project pick exists for this session yet. The LSP shim will run syntactic-only until a project is loaded.',
+        [Acc.Count]));
+      Writeln('');
+      Writeln('Use AskUserQuestion to ask the user which project to load, then call /delphi-project <name>. Available projects:');
+      Writeln('');
+      for I := 0 to Acc.Count - 1 do
+        Writeln('  - ' + ExtractFileName(Acc[I]));
+    end;
+  finally
+    Acc.Free;
+  end;
+end;
+
 procedure RunProxy;
 var
   Json, Method, UriToFire: string;
@@ -2497,6 +2697,26 @@ var
   SentinelWatcher: TSentinelWatcherThread;
 begin
   GLogPath := GetEnv('DELPHI_LSP_SHIM_LOG', '');
+
+  // Dual-mode binary: when invoked with --hook-session-start, behave as the
+  // SessionStart hook (read JSON from stdin, persist correlation files,
+  // optionally emit multi-candidate prompt) and exit. Otherwise run as the
+  // LSP shim. Same exe so PPID-resolution and plugin-data discovery share
+  // implementation; on Windows MinGW bash a separate hook script gets PPID=1
+  // due to process tree reparenting, breaking PPID-keyed correlation.
+  if (ParamCount >= 1) and SameText(ParamStr(1), '--hook-session-start') then
+  begin
+    Diag('--- delphi-lsp-shim hook-session-start mode ---');
+    Diag('CWD: ' + GetCurrentDir);
+    try
+      RunSessionStartHook;
+    except
+      on E: Exception do
+        Diag('Hook fatal: ' + E.ClassName + ': ' + E.Message);
+    end;
+    Halt(0);
+  end;
+
   Diag('--- delphi-lsp-shim starting ---');
   Diag('CWD: ' + GetCurrentDir);
 

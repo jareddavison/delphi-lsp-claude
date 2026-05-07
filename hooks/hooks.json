@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/on-session-start.sh\""
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/delphi-lsp-shim.exe\" --hook-session-start"
           }
         ]
       },
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/on-session-start.sh\""
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/delphi-lsp-shim.exe\" --hook-session-start"
           }
         ]
       }
