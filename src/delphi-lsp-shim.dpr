@@ -1579,14 +1579,95 @@ end;
 // Resolve the sticky-bindings file path from CLAUDE_CODE_SESSION_ID + plugin-data
 // base. Called once at startup before InitSettings so InitSettings can consult
 // sticky as part of its resolution chain.
+// Dump every env var whose name starts with CLAUDE — diagnostic for figuring
+// out which ones Claude Code propagates to LSP subprocesses (vs to Bash, where
+// CLAUDE_CODE_SESSION_ID is visible). Remove once propagation is understood.
+procedure DumpClaudeEnv;
+var
+  Block, P: PWideChar;
+  EntryStr: string;
+  EqIdx: Integer;
+begin
+  Block := GetEnvironmentStringsW;
+  if Block = nil then Exit;
+  try
+    P := Block;
+    while P^ <> #0 do
+    begin
+      EntryStr := P;
+      if (Length(EntryStr) >= 7) and SameText(Copy(EntryStr, 1, 7), 'CLAUDE_') then
+      begin
+        EqIdx := Pos('=', EntryStr);
+        if EqIdx > 0 then
+          Diag('env: ' + Copy(EntryStr, 1, EqIdx - 1) + '=' + Copy(EntryStr, EqIdx + 1, MaxInt))
+        else
+          Diag('env: ' + EntryStr);
+      end;
+      Inc(P, Length(EntryStr) + 1);
+    end;
+  finally
+    FreeEnvironmentStringsW(Block);
+  end;
+end;
+
+// Look for `--claude-session-id=<id>` in argv. The plugin manifest passes
+// this via `args: ["--claude-session-id=${CLAUDE_CODE_SESSION_ID}"]` so the
+// shim can recover the session id even if Claude Code doesn't propagate the
+// env var to LSP subprocesses. Returns '' if absent or if the placeholder
+// failed to substitute (still literally "${CLAUDE_CODE_SESSION_ID}").
+function ParseSessionIdFromArgv: string;
+const
+  Prefix = '--claude-session-id=';
+var
+  I: Integer;
+  Arg: string;
+begin
+  Result := '';
+  for I := 1 to ParamCount do
+  begin
+    Arg := ParamStr(I);
+    if (Length(Arg) > Length(Prefix)) and SameText(Copy(Arg, 1, Length(Prefix)), Prefix) then
+    begin
+      Result := Copy(Arg, Length(Prefix) + 1, MaxInt);
+      // Guard against unsubstituted placeholder (Claude Code didn't expand
+      // ${CLAUDE_CODE_SESSION_ID} — older client, env var missing, etc.).
+      if (Pos('${', Result) > 0) or (Result = '${CLAUDE_CODE_SESSION_ID}') then
+        Result := '';
+      Exit;
+    end;
+  end;
+end;
+
+procedure DumpArgv;
+var
+  I: Integer;
+begin
+  Diag(Format('argv: %d arg(s)', [ParamCount]));
+  for I := 0 to ParamCount do
+    Diag(Format('  argv[%d]=%s', [I, ParamStr(I)]));
+end;
+
 procedure InitSessionState;
 var
-  Base: string;
+  Base, FromArg: string;
 begin
+  DumpClaudeEnv;
+  DumpArgv;
   GClaudeSessionId := GetEnv('CLAUDE_CODE_SESSION_ID', '');
   if GClaudeSessionId = '' then
   begin
-    Diag('CLAUDE_CODE_SESSION_ID not set; cross-session sticky disabled');
+    FromArg := ParseSessionIdFromArgv;
+    if FromArg <> '' then
+    begin
+      GClaudeSessionId := FromArg;
+      Diag('Claude session id from argv: ' + GClaudeSessionId);
+    end;
+  end
+  else
+    Diag('Claude session id from env: ' + GClaudeSessionId);
+  if GClaudeSessionId = '' then
+  begin
+    Diag('CLAUDE_CODE_SESSION_ID not set (env or argv); cross-session sticky disabled');
     Exit;
   end;
   Base := ResolvePluginDataBase;
@@ -1597,7 +1678,6 @@ begin
   end;
   GSessionStatePath := IncludeTrailingPathDelimiter(Base) + 'session-state' +
                        PathDelim + GClaudeSessionId + '.json';
-  Diag('Claude session id: ' + GClaudeSessionId);
   Diag('Session state path: ' + GSessionStatePath);
 end;
 

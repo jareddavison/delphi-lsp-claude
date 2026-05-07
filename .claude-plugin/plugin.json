@@ -9,6 +9,7 @@
   "lspServers": {
     "delphilsp": {
       "command": "${CLAUDE_PLUGIN_ROOT}/bin/delphi-lsp-shim.exe",
+      "args": ["--claude-session-id=${CLAUDE_CODE_SESSION_ID}"],
       "extensionToLanguage": {
         ".pas": "objectpascal",
         ".inc": "objectpascal",
