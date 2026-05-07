@@ -41,7 +41,8 @@ uses
   System.Win.Registry,
   System.Generics.Collections,
   System.Generics.Defaults,
-  DelphiLsp.XmlDecode;
+  DelphiLsp.XmlDecode,
+  DelphiLsp.Paths;
 
 type
   TLspStream = class
@@ -348,28 +349,7 @@ begin
     Result := True;
 end;
 
-{ Path / settings file helpers }
-
-function PathToFileUri(const Path: string): string;
-var
-  Normalized, Encoded: string;
-  I: Integer;
-  Ch: Char;
-begin
-  Normalized := StringReplace(Path, '\', '/', [rfReplaceAll]);
-  Encoded := '';
-  for I := 1 to Length(Normalized) do
-  begin
-    Ch := Normalized[I];
-    case Ch of
-      'A'..'Z', 'a'..'z', '0'..'9', '/', '-', '_', '.', '~', ':':
-        Encoded := Encoded + Ch;
-    else
-      Encoded := Encoded + '%' + IntToHex(Ord(Ch), 2);
-    end;
-  end;
-  Result := 'file:///' + Encoded;
-end;
+{ Settings file helpers }
 
 procedure CollectSettingsFiles(const Dir: string; Depth: Integer; Acc: TList<string>);
 const
@@ -1511,14 +1491,6 @@ begin
   end;
 end;
 
-// Canonicalize a workspace path for hashing: lowercase (Windows), trim trailing
-// delimiter. Two shim processes spawned in the same directory must produce the
-// same hash regardless of casing or trailing slash.
-function NormalizeCwd(const Cwd: string): string;
-begin
-  Result := ExcludeTrailingPathDelimiter(LowerCase(Cwd));
-end;
-
 // Read the sticky pick for the current cwd from the per-claude-session-id
 // bindings file. Returns the absolute .delphilsp.json path if a valid entry
 // exists AND the file still exists on disk; '' otherwise. Survives shim death
@@ -1831,24 +1803,6 @@ begin
   finally
     Root.Free;
   end;
-end;
-
-// Reduce a workspace cwd to a comparable canonical form. The shim sees
-// Windows paths like `D:\Documents\TestDproj`; MinGW bash hooks emit
-// `/d/Documents/TestDproj`. Both should compare equal:
-//   D:\Documents\TestDproj    → d/documents/testdproj
-//   /d/Documents/TestDproj    → d/documents/testdproj
-// Lowercase + slash-normalize + strip drive colon + strip leading/trailing /.
-function CanonicalizeCwd(const Cwd: string): string;
-begin
-  Result := LowerCase(Cwd);
-  Result := StringReplace(Result, '\', '/', [rfReplaceAll]);
-  if (Length(Result) >= 2) and (Result[2] = ':') then
-    Delete(Result, 2, 1);
-  while (Length(Result) > 0) and (Result[1] = '/') do
-    Delete(Result, 1, 1);
-  while (Length(Result) > 0) and (Result[Length(Result)] = '/') do
-    Delete(Result, Length(Result), 1);
 end;
 
 // Scan <plugin-data>/claude-pid/by-id-*.json (deposited by SessionStart

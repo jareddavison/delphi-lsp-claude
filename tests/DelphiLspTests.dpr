@@ -9,7 +9,9 @@ uses
   DUnitX.Loggers.Xml.NUnit,
   DUnitX.TestFramework,
   DelphiLsp.XmlDecode in '..\src\units\DelphiLsp.XmlDecode.pas',
-  DelphiLsp.XmlDecodeTests in 'DelphiLsp.XmlDecodeTests.pas';
+  DelphiLsp.Paths in '..\src\units\DelphiLsp.Paths.pas',
+  DelphiLsp.XmlDecodeTests in 'DelphiLsp.XmlDecodeTests.pas',
+  DelphiLsp.PathsTests in 'DelphiLsp.PathsTests.pas';
 
 var
   Runner: ITestRunner;
