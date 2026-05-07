@@ -40,7 +40,8 @@ uses
   System.RegularExpressions,
   System.Win.Registry,
   System.Generics.Collections,
-  System.Generics.Defaults;
+  System.Generics.Defaults,
+  DelphiLsp.XmlDecode;
 
 type
   TLspStream = class
@@ -2940,101 +2941,6 @@ begin
     end;
   finally
     Acc.Free;
-  end;
-end;
-
-// Decode the five named XML entities (&amp; &lt; &gt; &quot; &apos;) plus
-// numeric character references (&#NN; / &#xNN;). The IDE-generated `.dproj`
-// rarely uses them in <DCCReference Include="..."> paths since typical
-// Windows paths don't contain `&` `<` `>`, but third-party `.dproj`
-// generators emit strict XML and may encode entities the regex would
-// otherwise capture verbatim. Stray ampersands or unknown entities are
-// passed through literally — defensive against malformed input.
-function XmlDecode(const S: string): string;
-const
-  Names: array[0..4] of string =
-    ('&amp;', '&quot;', '&apos;', '&lt;', '&gt;');
-  Decoded: array[0..4] of string =
-    ('&',     '"',      '''',     '<',    '>');
-var
-  I, J, SemiPos, CodePoint: Integer;
-  EntityStr: string;
-  Buf: TStringBuilder;
-  Matched: Boolean;
-begin
-  if Pos('&', S) = 0 then Exit(S); // fast path: no entities possible
-  Buf := TStringBuilder.Create;
-  try
-    I := 1;
-    while I <= Length(S) do
-    begin
-      if S[I] <> '&' then
-      begin
-        Buf.Append(S[I]);
-        Inc(I);
-        Continue;
-      end;
-      // Find ';' within a 12-char window (longest standard entity is &quot; = 6).
-      SemiPos := 0;
-      J := I + 1;
-      while (J <= Length(S)) and (J - I <= 12) do
-      begin
-        if S[J] = ';' then
-        begin
-          SemiPos := J;
-          Break;
-        end;
-        Inc(J);
-      end;
-      if SemiPos = 0 then
-      begin
-        Buf.Append(S[I]);
-        Inc(I);
-        Continue;
-      end;
-      EntityStr := Copy(S, I, SemiPos - I + 1);
-      Matched := False;
-      // Numeric: &#123; (decimal) or &#xAB; (hex)
-      if (Length(EntityStr) >= 4) and (EntityStr[2] = '#') then
-      begin
-        if (EntityStr[3] = 'x') or (EntityStr[3] = 'X') then
-        begin
-          if TryStrToInt('$' + Copy(EntityStr, 4, Length(EntityStr) - 4),
-                         CodePoint) then
-          begin
-            Buf.Append(Char(CodePoint));
-            Matched := True;
-          end;
-        end
-        else if TryStrToInt(Copy(EntityStr, 3, Length(EntityStr) - 3),
-                            CodePoint) then
-        begin
-          Buf.Append(Char(CodePoint));
-          Matched := True;
-        end;
-      end;
-      // Named: 5 standard XML entities
-      if not Matched then
-      begin
-        for J := Low(Names) to High(Names) do
-          if Names[J] = EntityStr then
-          begin
-            Buf.Append(Decoded[J]);
-            Matched := True;
-            Break;
-          end;
-      end;
-      if Matched then
-        I := SemiPos + 1
-      else
-      begin
-        Buf.Append(S[I]);
-        Inc(I);
-      end;
-    end;
-    Result := Buf.ToString;
-  finally
-    Buf.Free;
   end;
 end;
 

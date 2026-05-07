@@ -1,5 +1,7 @@
 # dcc64 build intermediates
 obj/
+tests/obj/
+tests/bin/
 *.dcu
 *.o
 *.identcache

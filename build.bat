@@ -62,6 +62,7 @@ if not exist "%~dp0obj" mkdir "%~dp0obj"
 dcc64.exe -B ^
   -E"%~dp0bin" ^
   -N0"%~dp0obj" ^
+  -U"%~dp0src\units" ^
   -NSSystem;Winapi;System.Win;Data ^
   "%~dp0src\delphi-lsp-shim.dpr" || goto :err
 echo BUILD OK: %~dp0bin\delphi-lsp-shim.exe
