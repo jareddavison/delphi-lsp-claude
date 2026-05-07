@@ -118,4 +118,6 @@ Trademark notice — this project is not affiliated with, endorsed by, or sponso
 - **Claude**, **Claude Code**, and the Anthropic logo are trademarks of Anthropic, PBC.
 - **Delphi**, **DelphiLSP**, **RAD Studio**, and **Embarcadero** are trademarks of Embarcadero Technologies, Inc. (an Idera, Inc. company).
 
-The names appear in this README, package metadata, and source code purely as descriptive references to the products this plugin interoperates with (nominative fair use). Users are responsible for holding their own valid Delphi license to run `DelphiLSP.exe`.
+The names appear in this README, package metadata, and source code purely as descriptive references to the products this plugin interoperates with (nominative fair use). The repository name `delphi-lsp-claude` is a compound of *Delphi LSP* (the language-server protocol implementation this plugin proxies) and *Claude* (the AI assistant this plugin integrates with) — both used descriptively. The published plugin name in `plugin.json` is just `delphi-lsp`. Nothing here represents an official Anthropic or Embarcadero project.
+
+Users are responsible for holding their own valid Delphi license to run `DelphiLSP.exe`.
