@@ -1723,10 +1723,110 @@ begin
   end;
 end;
 
+// Reduce a workspace cwd to a comparable canonical form. The shim sees
+// Windows paths like `D:\Documents\TestDproj`; MinGW bash hooks emit
+// `/d/Documents/TestDproj`. Both should compare equal:
+//   D:\Documents\TestDproj    → d/documents/testdproj
+//   /d/Documents/TestDproj    → d/documents/testdproj
+// Lowercase + slash-normalize + strip drive colon + strip leading/trailing /.
+function CanonicalizeCwd(const Cwd: string): string;
+begin
+  Result := LowerCase(Cwd);
+  Result := StringReplace(Result, '\', '/', [rfReplaceAll]);
+  if (Length(Result) >= 2) and (Result[2] = ':') then
+    Delete(Result, 2, 1);
+  while (Length(Result) > 0) and (Result[1] = '/') do
+    Delete(Result, 1, 1);
+  while (Length(Result) > 0) and (Result[Length(Result)] = '/') do
+    Delete(Result, Length(Result), 1);
+end;
+
+// Scan <plugin-data>/claude-pid/by-id-*.json (deposited by SessionStart
+// hooks), pick the one whose `cwd` field matches our cwd canonically AND
+// is most recently modified. The session_id from that file is the answer.
+//
+// Why this exists: SessionStart hook on Windows runs in MinGW bash, where
+// $PPID resolves to 1 (process tree reparenting). So we can't key the
+// hook drop file by Claude Code PID. Instead the hook keys by session_id
+// (which it knows from stdin payload) AND records cwd. The shim does the
+// correlation via cwd match + most-recent mtime as tiebreak.
+//
+// Race window for simultaneous same-cwd sessions: only between hook drop
+// times (sub-second). The mtime tiebreak picks whichever fired last, which
+// is "most recently started or resumed" — the closest signal we have to
+// "this current shim's session" without a real PID channel.
+function ResolveSessionIdViaHookFiles(const Cwd: string): string;
+const
+  Pattern = 'by-id-*.json';
+var
+  Base, Dir, FullPath, Content, EntryCwd, EntrySid, TargetCwd: string;
+  SR: TSearchRec;
+  BestSid: string;
+  BestAge: TDateTime;
+  Root, IdVal, CwdVal: TJSONValue;
+begin
+  Result := '';
+  Base := ResolvePluginDataBase;
+  if Base = '' then Exit;
+  Dir := IncludeTrailingPathDelimiter(Base) + 'claude-pid';
+  if not DirectoryExists(Dir) then Exit;
+
+  TargetCwd := CanonicalizeCwd(Cwd);
+  if TargetCwd = '' then Exit;
+
+  BestSid := '';
+  BestAge := 0;
+  if FindFirst(IncludeTrailingPathDelimiter(Dir) + Pattern, faAnyFile, SR) = 0 then
+  try
+    repeat
+      FullPath := IncludeTrailingPathDelimiter(Dir) + SR.Name;
+      try
+        Content := TFile.ReadAllText(FullPath, TEncoding.UTF8);
+      except
+        on E: Exception do
+        begin
+          Diag('Hook by-id read failed for ' + SR.Name + ': ' + E.Message);
+          Continue;
+        end;
+      end;
+      Root := nil;
+      try
+        try
+          Root := TJSONObject.ParseJSONValue(Content);
+        except
+          Continue;
+        end;
+        if not (Root is TJSONObject) then Continue;
+        IdVal := TJSONObject(Root).GetValue('session_id');
+        CwdVal := TJSONObject(Root).GetValue('cwd');
+        if (IdVal = nil) or (CwdVal = nil) then Continue;
+        EntrySid := IdVal.Value;
+        EntryCwd := CwdVal.Value;
+        if CanonicalizeCwd(EntryCwd) <> TargetCwd then Continue;
+        if (BestSid = '') or (SR.TimeStamp > BestAge) then
+        begin
+          BestSid := EntrySid;
+          BestAge := SR.TimeStamp;
+        end;
+      finally
+        Root.Free;
+      end;
+    until FindNext(SR) <> 0;
+  finally
+    FindClose(SR);
+  end;
+
+  if BestSid <> '' then
+    Diag('Hook by-id scan: matched session ' + BestSid + ' for cwd ' + Cwd);
+  Result := BestSid;
+end;
+
 // Read a session_id from a SessionStart hook's drop file at
 // <plugin-data>/claude-pid/<key>.json. Returns '' if no file or no
 // session_id field. Try a list of candidate keys (initialize processId,
-// shim PPID) — first hit wins.
+// shim PPID) — first hit wins. Note: on Windows-MinGW bash hooks,
+// $PPID resolves to 1, making this path unusable today; kept in case
+// hook PPID resolution gets fixed (e.g. via a Delphi companion exe).
 function ReadSessionIdFromHookFile(const Key: string): string;
 var
   Base, Path, Content: string;
@@ -1860,9 +1960,9 @@ begin
     end
     else
     begin
-      // Try the SessionStart hook's drop file keyed by our PPID — if Claude
-      // Code spawns LSP servers as direct children, our PPID = Claude Code's
-      // main PID = hook's PPID, so this hits race-free.
+      // First try the SessionStart hook's PPID-keyed drop file — only
+      // hits if hook PPID resolves to a real PID (broken on Windows MinGW
+      // bash where $PPID=1, fine on Linux/Mac).
       FromScan := ReadSessionIdFromHookFile(IntToStr(GetParentProcessId));
       if FromScan <> '' then
       begin
@@ -1872,11 +1972,25 @@ begin
       end
       else
       begin
-        FromScan := DiscoverSessionIdFromProjectsDir(GetCurrentDir);
+        // Then try by-id-*.json scan with cwd match — this is the path
+        // that actually works on Windows since the hook keys by session_id
+        // and we filter by cwd.
+        FromScan := ResolveSessionIdViaHookFiles(GetCurrentDir);
         if FromScan <> '' then
         begin
           GClaudeSessionId := FromScan;
-          Diag('Claude session id from projects-dir scan: ' + GClaudeSessionId);
+          Diag('Claude session id from hook by-id scan: ' + GClaudeSessionId);
+        end
+        else
+        begin
+          // Last resort: most-recent .jsonl mtime in the projects dir.
+          // Has a race window for simultaneous same-cwd sessions.
+          FromScan := DiscoverSessionIdFromProjectsDir(GetCurrentDir);
+          if FromScan <> '' then
+          begin
+            GClaudeSessionId := FromScan;
+            Diag('Claude session id from projects-dir scan: ' + GClaudeSessionId);
+          end;
         end;
       end;
     end;

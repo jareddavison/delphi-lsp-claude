@@ -73,8 +73,6 @@ printf '[%s] resolved session_id=%s\n' "$TS" "$SESSION_ID" >> "$LOG"
 JSON=$(printf '{"session_id":"%s","cwd":"%s","hook_pid":%d,"hook_ppid":%d,"timestamp":"%s","source":"%s"}' \
   "$SESSION_ID" "$PWD" "$HOOK_PID" "$HOOK_PPID" "$TS" "$SOURCE")
 
-# Atomic write keyed by hook PPID (= Claude Code's process, expected to
-# match the shim's processId from LSP initialize).
 write_atomic() {
   local target="$1"
   local tmp="${target}.tmp"
@@ -82,9 +80,19 @@ write_atomic() {
   mv -f "$tmp" "$target"
 }
 
-write_atomic "$DIR/$HOOK_PPID.json"
+# Primary key: session_id. The shim does cwd-match on these files.
+# Empirically the only key that works on Windows MinGW bash, where
+# $PPID resolves to 1 (process tree reparenting from cmd.exe → bash).
 write_atomic "$DIR/by-id-$SESSION_ID.json"
 
-printf '[%s] wrote %s and %s\n' "$TS" "$DIR/$HOOK_PPID.json" "$DIR/by-id-$SESSION_ID.json" >> "$LOG"
+# Conditional: only write the PPID-keyed file if PPID looks real
+# (>1, not init). Skipping it on Windows avoids spamming claude-pid/1.json
+# with whatever session fired the hook last.
+if [ "$HOOK_PPID" -gt 1 ] 2>/dev/null; then
+  write_atomic "$DIR/$HOOK_PPID.json"
+  printf '[%s] wrote by-id and PPID files\n' "$TS" >> "$LOG"
+else
+  printf '[%s] wrote by-id only (skipped PPID=%d)\n' "$TS" "$HOOK_PPID" >> "$LOG"
+fi
 
 exit 0
