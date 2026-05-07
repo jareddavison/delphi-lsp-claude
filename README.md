@@ -1,60 +1,107 @@
 # delphi-lsp (Claude Code plugin)
 
-> **Note:** The source and documentation in this project were AI-generated (Claude Code) and may contain errors. Review before trusting in production.
+> **Note:** The source and documentation in this project were AI-generated (Claude Code). Review before trusting in production.
 
-A Claude Code code-intelligence plugin that wires Embarcadero's DelphiLSP into Claude Code, mirroring how the official VS Code extension (`embarcaderotechnologies.delphilsp`) launches the server.
+A Claude Code code-intelligence plugin that wires Embarcadero's DelphiLSP into Claude Code, mirroring how the official VS Code extension (`embarcaderotechnologies.delphilsp`) launches the server. Adds:
 
-## What it does
-
-When Claude Code opens a `.pas`, `.inc`, `.dpr`, or `.dpk` file, this plugin spawns `DelphiLSP.exe` and pipes diagnostics + navigation (go-to-def, hover types, find references) back to Claude. After every edit Claude makes, DelphiLSP re-analyzes and reports errors inline — Claude can fix issues in the same turn without running the Delphi compiler.
+- **Hover, go-to-definition, find references, document/workspace symbols** via DelphiLSP.
+- **Push diagnostics** — DelphiLSP analyzes after every edit, errors arrive in the same turn.
+- **Per-(session, cwd) sticky project pick** that survives `claude --resume`.
+- **Multi-candidate prompt flow** — when a workspace has several `.delphilsp.json` files (typical for multi-project repos), Claude prompts you to pick one via `AskUserQuestion`, then `/delphi-project` loads it. Single-candidate workspaces auto-pick silently.
+- **Race-free correlation** between concurrent Claude Code sessions in the same workspace, even when they're working on different projects.
 
 ## Requirements
 
-- **Windows** with **RAD Studio 11+** installed (so `DelphiLSP.exe` is available). The shim resolves `DelphiLSP.exe` via PATH; RAD Studio's installer normally adds its `bin\` directory automatically. If not, set `DELPHI_LSP_EXE` to an absolute path.
+- **Windows** with **RAD Studio 11+** installed. The shim auto-detects the highest installed version via the registry; override via `DELPHI_LSP_EXE` (absolute path) or `/delphi-runtime` (slash command).
 - A valid Delphi license (DelphiLSP refuses to start without one).
 
 ## Install
 
-Clone the repo and point Claude Code at it:
+Clone and load via `--plugin-dir`:
 
 ```bash
 git clone https://github.com/jareddavison/delphi-lsp-claude
 claude --plugin-dir ./delphi-lsp-claude
 ```
 
-The `bin/delphi-lsp-shim.exe` ships precompiled, so no Delphi compiler is required to run the plugin — only to rebuild it (see [Building from source](#building-from-source)).
+`bin/delphi-lsp-shim.exe` ships precompiled — no Delphi compiler needed to run, only to rebuild (see [Building](#building)).
 
-## Per-project `.delphilsp.json` (important)
+## Per-project `.delphilsp.json`
 
-DelphiLSP needs a `.delphilsp.json` settings file describing the project's search paths, conditional defines, and platform target. RAD Studio generates this automatically when you open a `.dproj` in the IDE. **Without it, the server starts but reports no diagnostics for project-internal symbols.**
+DelphiLSP needs a `.delphilsp.json` settings file per project (search paths, conditional defines, platform/config target). RAD Studio writes one whenever you build a `.dproj` in the IDE. Without it, the server runs syntactic-only — no semantic queries, no diagnostics.
 
-To produce one for an existing `.dproj`:
+To produce one for a project: open the `.dproj` in RAD Studio once. The IDE writes `<ProjectName>.delphilsp.json` next to the `.dproj`. The file lives in the workspace, gets committed (or not, your call), and is picked up by this plugin automatically.
 
-1. Open the project in RAD Studio once — the IDE writes `<ProjectName>.delphilsp.json` next to the `.dproj`.
-2. Make sure that file lives somewhere under the workspace root Claude Code opens.
+When you switch the IDE's active config or platform (Debug/Release, Win32/Win64, etc.), RAD Studio rewrites `.delphilsp.json`. The shim watches for that and re-fires `didChangeConfiguration` automatically — so semantic queries reflect the IDE's current target.
 
-The plugin's shim (`bin/delphi-lsp-shim.exe`) walks the workspace at startup, picks the shallowest matching `.delphilsp.json`, and fires `workspace/didChangeConfiguration` with its file URI so DelphiLSP wires the project for semantic features. Set `DELPHI_LSP_SETTINGS=<absolute path>` in the environment to override the auto-pick.
+## How project selection works
+
+When Claude Code starts in a workspace:
+
+1. **Single `.delphilsp.json` candidate** → auto-picked silently.
+2. **Multiple candidates** → on first session in this workspace, Claude is told (via the SessionStart hook) to call `AskUserQuestion` with the candidate list, then `/delphi-project <name>` to load. Your pick is persisted as **sticky bindings**.
+3. **Resumed session** (`claude --resume <id>`) → sticky bindings restore your previous pick silently.
+4. **Override anytime** — `/delphi-project <name>` reloads on demand and rewrites the sticky.
+
+Sticky bindings are scoped per-(Claude session id, cwd). Two simultaneous sessions on the same repo can have different projects loaded without interfering.
+
+## Slash commands
+
+| Command | Purpose |
+| :--- | :--- |
+| `/delphi-project <name\|path>` | Switch the active `.delphilsp.json`. Argument is a basename match (e.g. `MyApp`), a relative path, or an absolute `.delphilsp.json` path. |
+| `/delphi-status` | Read-only — show registered shim PIDs, active project, and other available `.delphilsp.json` files in the workspace. |
+| `/delphi-reload` | Recycle DelphiLSP's child process (replays cached `initialize` + open documents). Useful if DelphiLSP gets into a bad state. |
+| `/delphi-runtime <ver\|path\|clear>` | Override which `DelphiLSP.exe` to spawn — e.g. `/delphi-runtime 37.0` for BDS 23.0 (Delphi 12 Athens), or an absolute `.exe` path. |
 
 ## How the shim works
 
-Claude Code's plugin manifest validator currently rejects most `lspServers.<name>.*` fields beyond `command`, `args`, and `extensionToLanguage` — including `initializationOptions` and `settings`, which is what the official VS Code extension uses to wire DelphiLSP for semantic features. The shim works around this by sitting between Claude Code and `DelphiLSP.exe` as a small stdio LSP proxy:
+Claude Code's plugin manifest validator accepts `command`, `args`, `env`, `extensionToLanguage`, `initializationOptions`, `settings`, `transport`, `workspaceFolder`, `startupTimeout` (etc.) for `lspServers.<name>.*`. However, manifest `${...}` substitution is whitelist-limited — only `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}`, `${user_config.*}` expand; arbitrary env vars (including `${CLAUDE_CODE_SESSION_ID}`) pass through literally. Combined with the fact that LSP subprocess env doesn't include `CLAUDE_CODE_SESSION_ID`, this plugin can't tell DelphiLSP about the project via static manifest. Hence the shim:
 
-1. Spawns `DelphiLSP.exe -LogModes 0 -LSPLogging <workspace>` (matches `embarcaderotechnologies.delphilsp-1.1.0/delphiMain.ts:36-37`).
-2. Injects `initializationOptions: { serverType: "controller", agentCount: 2 }` into the forwarded `initialize` request — same defaults as the VS Code extension's `package.json`.
-3. After the client's `initialized` notification, fires `workspace/didChangeConfiguration` with the auto-discovered `.delphilsp.json` URI.
-4. Otherwise byte-proxies LSP traffic in both directions.
+1. **Spawns** `DelphiLSP.exe -LogModes 0 -LSPLogging <workspace>` (matches `embarcaderotechnologies.delphilsp-1.1.0/delphiMain.ts:36-37`).
+2. **Injects** `initializationOptions: { serverType: "controller", agentCount: 2 }` into the forwarded `initialize` request — same defaults as the VS Code extension.
+3. **Fires** `workspace/didChangeConfiguration` with the chosen `.delphilsp.json` URI on `initialized`, or whenever `/delphi-project` switches.
+4. **Watches** the active `.delphilsp.json` for content changes (IDE re-writes on target switch) and re-fires `didChangeConfiguration` if the hash changes.
+5. **Byte-proxies** all other LSP traffic in both directions.
 
-Tunables (env vars, all optional):
+Plus dual-mode operation: when invoked with `--hook-session-start` or `--hook-session-end`, the same exe runs the corresponding SessionStart/SessionEnd hook (registered in `hooks/hooks.json`) and exits. One binary, all the heavy lifting (Win32 process tree walk, JSON parse, sticky bindings r/w) lives in shared Delphi code.
+
+## Persistent state
+
+Under `${CLAUDE_PLUGIN_DATA}` (resolves to `<claude-data-dir>/plugins/data/<plugin-id>/`):
+
+| Path | Lifetime | Purpose |
+| :--- | :--- | :--- |
+| `session-state/<claude-session-id>.json` | Persistent | Sticky project pick keyed by sha256 of canonical cwd. Survives shim death and Claude Code restart. GC'd only when the corresponding `.jsonl` in `<claude-data-dir>/projects/` is gone (session unresumable). |
+| `claude-pid/<ancestor-pid>.json` | Per-session | Hook-deposited correlation drop, one per ancestor PID. Lets the shim resolve its session id race-free by walking its own ancestry. GC'd at startup if the PID is dead, or eagerly on SessionEnd. |
+| `claude-pid/by-id-<session>.json` | Per-session | Same hook drop, keyed by session id (cwd-canonical-match fallback). |
+| `sessions/<shim-pid>/active.txt` | Per-shim | In-session pick written by `/delphi-project`. |
+| `sessions/<shim-pid>/runtime.txt` | Per-shim | DelphiLSP path override written by `/delphi-runtime`. |
+| `sessions/<shim-pid>/reload.flag` | Per-shim | Sentinel deposited by `/delphi-reload`, consumed by the shim. |
+
+Cleanup:
+
+- **Startup GC** — sweeps stale `session-state/*.json` and `claude-pid/*.json` entries. Skipped entirely if the shim's own session can't be located in the projects dir (defends against data-dir overrides, sync lag, encoding-format changes).
+- **SessionEnd hook** — eagerly deletes per-session correlation drops on session close.
+- **Orphan session GC** — sweeps `sessions/<dead-pid>/` directories on every shim startup.
+
+## Tunables (env vars, all optional)
 
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
-| `DELPHI_LSP_EXE` | `DelphiLSP.exe` | Path or PATH name of the server binary |
-| `DELPHI_LSP_LOG_MODES` | `0` | Bit mask passed to `-LogModes` |
-| `DELPHI_LSP_SERVER_TYPE` | `controller` | `controller` \| `agent` \| `linter` |
-| `DELPHI_LSP_AGENT_COUNT` | `2` | 1 or 2 (controller mode only) |
-| `DELPHI_LSP_SETTINGS` | *(auto-discover)* | Explicit path to `.delphilsp.json` |
-| `DELPHI_LSP_SHIM_LOG` | *(disabled)* | Append shim diagnostics to this file |
+| `DELPHI_LSP_EXE` | *(auto-detect)* | Path or PATH name of `DelphiLSP.exe`. Highest BDS version is auto-resolved via registry; this overrides. |
+| `DELPHI_LSP_LOG_MODES` | `0` | Bitmask passed to `-LogModes`. |
+| `DELPHI_LSP_SERVER_TYPE` | `controller` | `controller` \| `agent` \| `linter` (controller spawns sub-process agents; non-controller modes don't push diagnostics). |
+| `DELPHI_LSP_AGENT_COUNT` | `2` | 1 or 2 (controller mode only; ≥2 enables Error Insight push diagnostics). |
+| `DELPHI_LSP_SETTINGS` | *(sticky → single-candidate → none)* | Explicit `.delphilsp.json` path; bypasses sticky/auto-pick chain. |
+| `DELPHI_LSP_SHIM_LOG` | *(disabled)* | Append shim diagnostics to this file. |
 
-## Building from source
+## Building
 
-The shim source is `src/delphi-lsp-shim.dpr`. `build.bat` sources `rsvars.bat` from a RAD Studio install and compiles with `dcc64`. The bundled `bin/delphi-lsp-shim.exe` is statically linked and has no runtime dependencies beyond `DelphiLSP.exe` itself.
+```bash
+build.bat
+```
+
+Picks the highest installed RAD Studio (`C:\Program Files (x86)\Embarcadero\Studio\<X.Y>\` with `bin\dcc64.exe` + `bin\rsvars.bat`); override via `BDS_VERSION=37.0`. Output: `bin\delphi-lsp-shim.exe` — statically linked, no runtime dependencies beyond `DelphiLSP.exe` itself. Compile time ~0.1s.
+
+If the shim is currently running, rename `bin\delphi-lsp-shim.exe` to `bin\delphi-lsp-shim.exe.inuse` first; the `.exe.inuse*` pattern is gitignored. (Or just close Claude Code, which terminates the shim.)
