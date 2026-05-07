@@ -1649,15 +1649,13 @@ begin
 end;
 
 // Win32 doesn't have a one-call GetParentProcessId. Walk the toolhelp
-// snapshot looking for our own PID and pull its th32ParentProcessID.
-function GetParentProcessId: DWORD;
+// snapshot looking for the given PID and pull its th32ParentProcessID.
+function GetParentOfPid(Pid: DWORD): DWORD;
 var
   Snapshot: THandle;
   Entry: TProcessEntry32W;
-  SelfPid: DWORD;
 begin
   Result := 0;
-  SelfPid := GetCurrentProcessId;
   Snapshot := CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if Snapshot = INVALID_HANDLE_VALUE then Exit;
   try
@@ -1666,7 +1664,7 @@ begin
     if Process32FirstW(Snapshot, Entry) then
     begin
       repeat
-        if Entry.th32ProcessID = SelfPid then
+        if Entry.th32ProcessID = Pid then
         begin
           Result := Entry.th32ParentProcessID;
           Exit;
@@ -1675,6 +1673,45 @@ begin
     end;
   finally
     CloseHandle(Snapshot);
+  end;
+end;
+
+function GetParentProcessId: DWORD;
+begin
+  Result := GetParentOfPid(GetCurrentProcessId);
+end;
+
+// Collect process ancestors by walking up via th32ParentProcessID. Used to
+// correlate hook and shim across Claude Code's process tree: both descend
+// from Claude Code's main process, but possibly through different
+// intermediate subprocesses (hooks-runner vs LSP-runner). The hook records
+// drop files keyed by EVERY ancestor PID; the shim walks its OWN ancestry
+// looking for a match. They intersect at Claude Code's main PID (or higher),
+// giving a race-free per-Claude-Code-instance correlation key.
+//
+// Bounded at 20 levels deep + cycle detection in case of weirdness; in
+// practice Claude Code's process tree is 3-5 levels.
+function GetAncestorPids(StartPid: DWORD): TArray<DWORD>;
+const
+  MaxDepth = 20;
+  SystemPid = 4;     // Windows System process (PID 4); not a useful ancestor
+var
+  Acc: TList<DWORD>;
+  Current: DWORD;
+begin
+  Acc := TList<DWORD>.Create;
+  try
+    Current := StartPid;
+    while (Current > SystemPid) and (Acc.Count < MaxDepth) do
+    begin
+      if Acc.IndexOf(Current) >= 0 then Break; // cycle guard
+      Acc.Add(Current);
+      Current := GetParentOfPid(Current);
+      if Current = 0 then Break;
+    end;
+    Result := Acc.ToArray;
+  finally
+    Acc.Free;
   end;
 end;
 
@@ -1930,6 +1967,9 @@ end;
 procedure InitSessionState;
 var
   Base, FromArg, FromScan: string;
+  Ancestors: TArray<DWORD>;
+  AncIdx: Integer;
+  AncId: DWORD;
 begin
   DumpClaudeEnv;
   DumpArgv;
@@ -1960,37 +2000,49 @@ begin
     end
     else
     begin
-      // First try the SessionStart hook's PPID-keyed drop file — only
-      // hits if hook PPID resolves to a real PID (broken on Windows MinGW
-      // bash where $PPID=1, fine on Linux/Mac).
-      FromScan := ReadSessionIdFromHookFile(IntToStr(GetParentProcessId));
-      if FromScan <> '' then
+      // Walk the shim's process ancestry looking for any hook drop file
+      // keyed by an ancestor PID. The hook writes one file per ancestor;
+      // we walk ours from the bottom up. They share Claude Code's main
+      // process (or higher) as a common ancestor — race-free per Claude
+      // Code instance, even with multiple simultaneous sessions in the
+      // same workspace.
+      Ancestors := GetAncestorPids(GetCurrentProcessId);
+      Diag(Format('Walking %d ancestor(s) for hook drop file', [Length(Ancestors)]));
+      for AncIdx := 0 to High(Ancestors) do
       begin
-        GClaudeSessionId := FromScan;
-        Diag(Format('Claude session id from hook file (key=ppid=%d): %s',
-          [GetParentProcessId, GClaudeSessionId]));
-      end
-      else
+        AncId := Ancestors[AncIdx];
+        Diag(Format('  ancestor[%d]=%d', [AncIdx, AncId]));
+        FromScan := ReadSessionIdFromHookFile(IntToStr(AncId));
+        if FromScan <> '' then
+        begin
+          GClaudeSessionId := FromScan;
+          Diag(Format('Claude session id from hook file (ancestor pid=%d): %s',
+            [AncId, GClaudeSessionId]));
+          Break;
+        end;
+      end;
+
+      if GClaudeSessionId = '' then
       begin
-        // Then try by-id-*.json scan with cwd match — this is the path
-        // that actually works on Windows since the hook keys by session_id
-        // and we filter by cwd.
+        // Fallback: by-id-*.json scan + cwd canonical match. Used to be
+        // the primary on Windows when hook PPID was wrong; now a backstop.
         FromScan := ResolveSessionIdViaHookFiles(GetCurrentDir);
         if FromScan <> '' then
         begin
           GClaudeSessionId := FromScan;
           Diag('Claude session id from hook by-id scan: ' + GClaudeSessionId);
-        end
-        else
+        end;
+      end;
+
+      if GClaudeSessionId = '' then
+      begin
+        // Last resort: most-recent .jsonl mtime in projects dir. Race window
+        // for simultaneous same-cwd sessions.
+        FromScan := DiscoverSessionIdFromProjectsDir(GetCurrentDir);
+        if FromScan <> '' then
         begin
-          // Last resort: most-recent .jsonl mtime in the projects dir.
-          // Has a race window for simultaneous same-cwd sessions.
-          FromScan := DiscoverSessionIdFromProjectsDir(GetCurrentDir);
-          if FromScan <> '' then
-          begin
-            GClaudeSessionId := FromScan;
-            Diag('Claude session id from projects-dir scan: ' + GClaudeSessionId);
-          end;
+          GClaudeSessionId := FromScan;
+          Diag('Claude session id from projects-dir scan: ' + GClaudeSessionId);
         end;
       end;
     end;
@@ -2455,6 +2507,7 @@ var
   Acc: TList<string>;
   I: Integer;
   EntryObj: TJSONObject;
+  Ancestors: TArray<DWORD>;
 begin
   PayloadBytes := ReadAllStdin;
   Payload := TEncoding.UTF8.GetString(PayloadBytes);
@@ -2524,18 +2577,30 @@ begin
     EntryObj.Free;
   end;
 
-  // Primary: PPID-keyed. The shim's startup ReadSessionIdFromHookFile(GetParentProcessId)
-  // matches against this — race-free per Claude Code instance.
-  PpidPath := IncludeTrailingPathDelimiter(ClaudePidDir) + IntToStr(Ppid) + '.json';
-  WriteFileAtomic(PpidPath, EntryJson);
+  // Write a file for each ancestor PID. The shim walks its own ancestry
+  // looking for any matching file — they share Claude Code's main PID (or
+  // higher) as a common ancestor, even though hook PPID and shim PPID
+  // differ (Claude Code spawns them from different subprocess parents).
+  // Writing one file per ancestor instead of just PPID makes the lookup
+  // race-free regardless of which intermediate subprocess spawned each.
+  Ancestors := GetAncestorPids(GetCurrentProcessId);
+  for I := 0 to High(Ancestors) do
+  begin
+    PpidPath := IncludeTrailingPathDelimiter(ClaudePidDir) +
+                IntToStr(Ancestors[I]) + '.json';
+    WriteFileAtomic(PpidPath, EntryJson);
+  end;
 
-  // Fallback: by-id-<session>.json. The shim's by-id+cwd scan uses this if
-  // PPID-keyed lookup misses (shouldn't happen now, but defensive).
+  // Fallback: by-id-<session>.json keyed by session id. The shim's by-id+cwd
+  // scan uses this if no ancestor file matches (shouldn't happen, defensive).
   ByIdPath := IncludeTrailingPathDelimiter(ClaudePidDir) +
               'by-id-' + SessionId + '.json';
   WriteFileAtomic(ByIdPath, EntryJson);
 
-  Diag(Format('Hook: wrote %s and %s', [PpidPath, ByIdPath]));
+  Diag(Format('Hook: wrote ancestor files for %d ancestors + by-id file',
+    [Length(Ancestors)]));
+  for I := 0 to High(Ancestors) do
+    Diag(Format('  ancestor[%d]=%d', [I, Ancestors[I]]));
 
   // Multi-candidate prompt: only if no sticky AND >1 .delphilsp.json files.
   StickyFile := IncludeTrailingPathDelimiter(Base) + 'session-state' +
