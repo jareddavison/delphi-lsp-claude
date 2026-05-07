@@ -95,4 +95,59 @@ else
   printf '[%s] wrote by-id only (skipped PPID=%d)\n' "$TS" "$HOOK_PPID" >> "$LOG"
 fi
 
+# ---- Multi-candidate detection ----
+# Goal: if the workspace has >1 .delphilsp.json AND no sticky pick exists
+# for this (session, cwd), tell Claude to prompt the user via
+# AskUserQuestion. Single-candidate and resumed-with-sticky paths stay
+# silent — the shim handles them automatically.
+
+# The shim hashes canonical cwd: lowercase + ExcludeTrailingPathDelimiter
+# of the Windows-form path. Reproduce in bash via cygpath + tr + sed.
+if command -v cygpath >/dev/null 2>&1; then
+  WINCWD="$(cygpath -w "$PWD" 2>/dev/null)"
+else
+  WINCWD="$PWD"
+fi
+CWD_NORM="$(printf '%s' "$WINCWD" | tr '[:upper:]' '[:lower:]' | sed 's:[\\/]\+$::')"
+CWD_HASH="$(printf '%s' "$CWD_NORM" | sha256sum | awk '{print $1}')"
+
+STICKY_FILE="$DATA/session-state/$SESSION_ID.json"
+HAS_STICKY=no
+if [ -f "$STICKY_FILE" ] && grep -q "\"$CWD_HASH\"" "$STICKY_FILE" 2>/dev/null; then
+  HAS_STICKY=yes
+fi
+
+# Enumerate candidates with the same depth/pruning as the shim's
+# CollectSettingsFiles (depth 6, skip node_modules/__history/Win32/Win64/.git/.svn).
+# `find -maxdepth` is 1-based from current dir; shim's depth is the recursion
+# depth which counts the same. Use \( ... \) groups to keep readable.
+candidates() {
+  find . -maxdepth 6 -type f -iname '*.delphilsp.json' \
+    \( -not -path '*/node_modules/*' \) \
+    \( -not -path '*/__history/*' \) \
+    \( -not -path '*/__recovery/*' \) \
+    \( -not -path '*/Win32/*' \) \
+    \( -not -path '*/Win64/*' \) \
+    \( -not -path '*/.git/*' \) \
+    \( -not -path '*/.svn/*' \) \
+    2>/dev/null | sed 's:^\./::' | sort
+}
+
+CAND_LIST="$(candidates)"
+CAND_COUNT="$(printf '%s\n' "$CAND_LIST" | grep -c '\.delphilsp\.json$' || true)"
+
+printf '[%s] sticky=%s candidates=%d\n' "$TS" "$HAS_STICKY" "$CAND_COUNT" >> "$LOG"
+
+# Only emit the prompt if multi-candidate and no sticky. Use stdout so
+# Claude Code feeds it back as additional context for the assistant.
+if [ "$HAS_STICKY" = "no" ] && [ "$CAND_COUNT" -gt 1 ]; then
+  cat <<EOF
+The DelphiLSP plugin found $CAND_COUNT .delphilsp.json projects in this workspace and no sticky project pick exists for this session yet. The LSP shim is running syntactic-only — hover, goToDefinition, and push diagnostics will not work until a project is loaded.
+
+Use AskUserQuestion to ask which project to load, then call /delphi-project <name> to load it. Available projects (basename derived from .delphilsp.json filename):
+
+$(printf '%s\n' "$CAND_LIST" | sed 's:^:  - :')
+EOF
+fi
+
 exit 0
