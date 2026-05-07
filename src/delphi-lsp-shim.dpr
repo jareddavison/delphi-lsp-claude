@@ -56,10 +56,14 @@ type
   private
     FFromChild: TLspStream;
     FToClient: TLspStream;
+    FSwallowIds: TList<string>;          // response IDs to drop (replay artifacts)
+    function ShouldDrop(const Json: string): Boolean;
   protected
     procedure Execute; override;
   public
     constructor Create(AFromChild, AToClient: TLspStream);
+    destructor Destroy; override;
+    procedure SwallowResponseId(const Id: string);
   end;
 
   // Watches the per-session sentinel directory for `active.txt`/`reload.flag`
@@ -127,26 +131,26 @@ type
     FChildIn: THandle;
     FChildOut: THandle;
     FChildHandle: THandle;
-    FChildInLock: TCriticalSection;
+    FChildInLock: TCriticalSection;     // serializes track + write + recycle
     FDidFireConfig: Boolean;
     FOpenDocs: TDictionary<string, TOpenDocument>;
-    FOpenDocsLock: TObject;
     FCachedInitJson: string;
     FCachedInitializedJson: string;
+    FReader: TChildReaderThread;
+    FRecycleCounter: Integer;            // distinguishes synthetic init IDs across recycles
+    procedure WriteRawLocked(const Json: string);
+    procedure TrackOutgoingMessageLocked(const Json: string; const Method: string);
   public
     constructor Create(AClientIn, AClientOut: THandle);
     destructor Destroy; override;
     function StartChildConnection: Boolean;
     procedure StopChildConnection;
     procedure WriteToChild(const Json: string);
-    procedure TrackOutgoingMessage(const Json: string; const Method: string);
+    procedure SendToChild(const Json: string; const Method: string);
+    procedure RecycleChild;
     function ChildAlive: Boolean;
     property ClientStream: TLspStream read FClientToShim;
-    property ChildStream: TLspStream read FChildToShim;
-    property ClientOutStream: TLspStream read FShimToClient;
     property DidFireConfig: Boolean read FDidFireConfig write FDidFireConfig;
-    property CachedInit: string read FCachedInitJson;
-    property CachedInitialized: string read FCachedInitializedJson;
   end;
 
   // Encapsulates everything tied to one specific `.delphilsp.json`. Replacing
@@ -522,6 +526,59 @@ begin
   end;
 end;
 
+// Build a synthesized textDocument/didOpen for the new DelphiLSP child during
+// /delphi-reload replay. Uses the version + text the shim has been mirroring.
+function MakeDidOpenJson(const Uri: string; const Doc: TOpenDocument): string;
+var
+  Root, Params, TextDoc: TJSONObject;
+begin
+  Root := TJSONObject.Create;
+  try
+    Root.AddPair('jsonrpc', '2.0');
+    Root.AddPair('method', 'textDocument/didOpen');
+    TextDoc := TJSONObject.Create;
+    TextDoc.AddPair('uri', Uri);
+    TextDoc.AddPair('languageId', Doc.LanguageId);
+    TextDoc.AddPair('version', TJSONNumber.Create(Doc.Version));
+    TextDoc.AddPair('text', Doc.Text);
+    Params := TJSONObject.Create;
+    Params.AddPair('textDocument', TextDoc);
+    Root.AddPair('params', Params);
+    Result := Root.ToJSON;
+  finally
+    Root.Free;
+  end;
+end;
+
+// Replace the `id` field of a cached LSP request JSON with a synthetic value.
+// Used to rewrite the cached `initialize` request before replaying it to a
+// fresh DelphiLSP child — the original ID was already consumed by the LSP
+// client when the original initialize handshake completed.
+function RewriteInitId(const Json, NewId: string): string;
+var
+  Root: TJSONValue;
+  Obj: TJSONObject;
+  ExistingPair: TJSONPair;
+begin
+  Result := Json;
+  Root := nil;
+  try
+    try
+      Root := TJSONObject.ParseJSONValue(Json);
+    except
+      Exit;
+    end;
+    if not (Root is TJSONObject) then Exit;
+    Obj := TJSONObject(Root);
+    ExistingPair := Obj.RemovePair('id');
+    if ExistingPair <> nil then ExistingPair.Free;
+    Obj.AddPair('id', NewId);
+    Result := Obj.ToJSON;
+  finally
+    Root.Free;
+  end;
+end;
+
 { Helpers used by TLspSession.TrackOutgoingMessage }
 
 // LSP positions are zero-indexed line + UTF-16 character offset within line.
@@ -601,7 +658,6 @@ begin
   inherited Create;
   FChildInLock := TCriticalSection.Create;
   FOpenDocs := TDictionary<string, TOpenDocument>.Create;
-  FOpenDocsLock := TObject.Create;
   FClientToShim := TLspStream.Create(AClientIn);
   FShimToClient := TLspStream.Create(AClientOut);
 end;
@@ -612,7 +668,6 @@ begin
   FClientToShim.Free;
   FShimToClient.Free;
   FOpenDocs.Free;
-  FOpenDocsLock.Free;
   FChildInLock.Free;
   inherited;
 end;
@@ -677,16 +732,16 @@ begin
   CloseHandle(ChildOutWrite);
   FShimToChild := TLspStream.Create(FChildIn);
   FChildToShim := TLspStream.Create(FChildOut);
+  // Reader thread is owned by the session — replaced on every recycle.
+  FReader := TChildReaderThread.Create(FChildToShim, FShimToClient);
+  FReader.FreeOnTerminate := False;
   Result := True;
 end;
 
 procedure TLspSession.StopChildConnection;
 begin
-  if FShimToChild <> nil then
-  begin
-    FShimToChild.Free;
-    FShimToChild := nil;
-  end;
+  // Close child stdin first so the child sees EOF and (often) exits cleanly,
+  // freeing it to release its end of the stdout pipe.
   if FChildIn <> 0 then
   begin
     CloseHandle(FChildIn);
@@ -699,24 +754,58 @@ begin
     CloseHandle(FChildHandle);
     FChildHandle := 0;
   end;
-  if FChildToShim <> nil then
+  // Reader's blocking ReadFile on FChildOut now returns ERROR_BROKEN_PIPE,
+  // ReadMessage returns False, Execute exits — we just have to wait.
+  if FReader <> nil then
   begin
-    FChildToShim.Free;
-    FChildToShim := nil;
+    FReader.Terminate; // belt-and-suspenders if reader is somewhere else
+    FReader.WaitFor;
+    FReader.Free;
+    FReader := nil;
   end;
   if FChildOut <> 0 then
   begin
     CloseHandle(FChildOut);
     FChildOut := 0;
   end;
+  if FShimToChild <> nil then
+  begin
+    FShimToChild.Free;
+    FShimToChild := nil;
+  end;
+  if FChildToShim <> nil then
+  begin
+    FChildToShim.Free;
+    FChildToShim := nil;
+  end;
+end;
+
+procedure TLspSession.WriteRawLocked(const Json: string);
+begin
+  if FShimToChild <> nil then
+    FShimToChild.WriteMessage(Json);
 end;
 
 procedure TLspSession.WriteToChild(const Json: string);
 begin
   FChildInLock.Acquire;
   try
-    if FShimToChild <> nil then
-      FShimToChild.WriteMessage(Json);
+    WriteRawLocked(Json);
+  finally
+    FChildInLock.Release;
+  end;
+end;
+
+procedure TLspSession.SendToChild(const Json: string; const Method: string);
+begin
+  FChildInLock.Acquire;
+  try
+    try
+      TrackOutgoingMessageLocked(Json, Method);
+    except
+      on E: Exception do Diag('TrackOutgoingMessage error: ' + E.Message);
+    end;
+    WriteRawLocked(Json);
   finally
     FChildInLock.Release;
   end;
@@ -730,8 +819,9 @@ end;
 // Parse outgoing client-to-child message and update session-state mirrors.
 // Caches initialize/initialized verbatim. Tracks didOpen/didChange/didClose
 // in FOpenDocs so a later /delphi-reload can replay the synthetic didOpens
-// to a fresh DelphiLSP child.
-procedure TLspSession.TrackOutgoingMessage(const Json: string; const Method: string);
+// to a fresh DelphiLSP child. Caller must hold FChildInLock — this method
+// makes no further locking.
+procedure TLspSession.TrackOutgoingMessageLocked(const Json: string; const Method: string);
 var
   Root: TJSONValue;
   Obj, Params, TextDoc, ChangeObj: TJSONObject;
@@ -775,53 +865,123 @@ begin
     Uri := TextDoc.GetValue('uri').Value;
     if Uri = '' then Exit;
 
-    TMonitor.Enter(FOpenDocsLock);
-    try
-      if Method = 'textDocument/didOpen' then
+    if Method = 'textDocument/didOpen' then
+    begin
+      if (TextDoc.GetValue('languageId') = nil) or
+         (TextDoc.GetValue('version') = nil) or
+         (TextDoc.GetValue('text') = nil) then Exit;
+      Doc.LanguageId := TextDoc.GetValue('languageId').Value;
+      Doc.Version := StrToIntDef(TextDoc.GetValue('version').Value, 0);
+      Doc.Text := TextDoc.GetValue('text').Value;
+      FOpenDocs.AddOrSetValue(Uri, Doc);
+      Diag(Format('didOpen tracked: %s (lang=%s, ver=%d, len=%d)',
+        [Uri, Doc.LanguageId, Doc.Version, Length(Doc.Text)]));
+    end
+    else if Method = 'textDocument/didChange' then
+    begin
+      Found := FOpenDocs.TryGetValue(Uri, Doc);
+      if not Found then
       begin
-        if (TextDoc.GetValue('languageId') = nil) or
-           (TextDoc.GetValue('version') = nil) or
-           (TextDoc.GetValue('text') = nil) then Exit;
-        Doc.LanguageId := TextDoc.GetValue('languageId').Value;
-        Doc.Version := StrToIntDef(TextDoc.GetValue('version').Value, 0);
-        Doc.Text := TextDoc.GetValue('text').Value;
-        FOpenDocs.AddOrSetValue(Uri, Doc);
-        Diag(Format('didOpen tracked: %s (lang=%s, ver=%d, len=%d)',
-          [Uri, Doc.LanguageId, Doc.Version, Length(Doc.Text)]));
-      end
-      else if Method = 'textDocument/didChange' then
-      begin
-        Found := FOpenDocs.TryGetValue(Uri, Doc);
-        if not Found then
-        begin
-          Diag('didChange for untracked document: ' + Uri);
-          Exit;
-        end;
-        if TextDoc.GetValue('version') <> nil then
-          Doc.Version := StrToIntDef(TextDoc.GetValue('version').Value, Doc.Version);
-        Changes := TJSONArray(Params.GetValue('contentChanges'));
-        if Changes <> nil then
-          for I := 0 to Changes.Count - 1 do
-          begin
-            ChangeObj := TJSONObject(Changes.Items[I]);
-            if ChangeObj <> nil then
-              ApplyContentChange(Doc.Text, ChangeObj);
-          end;
-        FOpenDocs.AddOrSetValue(Uri, Doc);
-      end
-      else if Method = 'textDocument/didClose' then
-      begin
-        if FOpenDocs.ContainsKey(Uri) then
-        begin
-          FOpenDocs.Remove(Uri);
-          Diag('didClose tracked: ' + Uri);
-        end;
+        Diag('didChange for untracked document: ' + Uri);
+        Exit;
       end;
-    finally
-      TMonitor.Exit(FOpenDocsLock);
+      if TextDoc.GetValue('version') <> nil then
+        Doc.Version := StrToIntDef(TextDoc.GetValue('version').Value, Doc.Version);
+      Changes := TJSONArray(Params.GetValue('contentChanges'));
+      if Changes <> nil then
+        for I := 0 to Changes.Count - 1 do
+        begin
+          ChangeObj := TJSONObject(Changes.Items[I]);
+          if ChangeObj <> nil then
+            ApplyContentChange(Doc.Text, ChangeObj);
+        end;
+      FOpenDocs.AddOrSetValue(Uri, Doc);
+    end
+    else if Method = 'textDocument/didClose' then
+    begin
+      if FOpenDocs.ContainsKey(Uri) then
+      begin
+        FOpenDocs.Remove(Uri);
+        Diag('didClose tracked: ' + Uri);
+      end;
     end;
   finally
     Root.Free;
+  end;
+end;
+
+// Kill the current DelphiLSP child and start a new one. Replays:
+//   1. cached `initialize` (rewritten with a synthetic ID we own; reader
+//      drops the matching response so the client never sees a duplicate)
+//   2. cached `initialized` notification
+//   3. `workspace/didChangeConfiguration` for the current active project
+//   4. `textDocument/didOpen` for every entry in FOpenDocs
+// Holds FChildInLock for the whole sequence so the main proxy loop's
+// next forward goes to the new child cleanly.
+procedure TLspSession.RecycleChild;
+var
+  CachedInit, CachedInited, CurrentUri, ReplayId: string;
+  Pair: TPair<string, TOpenDocument>;
+  ReplayedDocs: Integer;
+begin
+  Diag('RecycleChild: starting');
+  if FCachedInitJson = '' then
+  begin
+    Diag('RecycleChild: no cached initialize, aborting');
+    Exit;
+  end;
+
+  FChildInLock.Acquire;
+  try
+    CachedInit := FCachedInitJson;
+    CachedInited := FCachedInitializedJson;
+
+    // Tear down old child (closes pipes, joins reader, frees streams).
+    StopChildConnection;
+
+    // Spawn fresh child + start a new reader for it.
+    if not StartChildConnection then
+    begin
+      Diag('RecycleChild: StartChildConnection failed; shim is now without a child');
+      Exit;
+    end;
+
+    // Synthetic ID lets the reader recognize and drop the replayed init's
+    // response (the original ID was already consumed by the LSP client).
+    Inc(FRecycleCounter);
+    ReplayId := Format('delphi-lsp-shim-replay-%d', [FRecycleCounter]);
+    if FReader <> nil then
+      FReader.SwallowResponseId(ReplayId);
+
+    WriteRawLocked(RewriteInitId(CachedInit, ReplayId));
+    if CachedInited <> '' then
+      WriteRawLocked(CachedInited);
+
+    // Re-fire didChangeConfiguration for current project, if known.
+    TMonitor.Enter(GProjectGuard);
+    try
+      if GActiveProject <> nil then
+        CurrentUri := GActiveProject.Uri
+      else
+        CurrentUri := '';
+    finally
+      TMonitor.Exit(GProjectGuard);
+    end;
+    if CurrentUri <> '' then
+      WriteRawLocked(MakeDidChangeConfigJson(CurrentUri));
+
+    // Replay every open document so DelphiLSP rebuilds its in-memory model.
+    ReplayedDocs := 0;
+    for Pair in FOpenDocs do
+    begin
+      WriteRawLocked(MakeDidOpenJson(Pair.Key, Pair.Value));
+      Inc(ReplayedDocs);
+    end;
+
+    Diag(Format('RecycleChild: replay complete (replayId=%s, didOpens=%d)',
+      [ReplayId, ReplayedDocs]));
+  finally
+    FChildInLock.Release;
   end;
 end;
 
@@ -928,6 +1088,26 @@ begin
   end;
 end;
 
+// /delphi-reload writes a sentinel file at <session>/reload.flag. The watcher
+// notices, this function is called, the flag is consumed (deleted), and the
+// session recycles its DelphiLSP child.
+procedure ReadAndApplyReloadFlag;
+var
+  FlagPath: string;
+begin
+  if GSessionDir = '' then Exit;
+  FlagPath := IncludeTrailingPathDelimiter(GSessionDir) + 'reload.flag';
+  if not FileExists(FlagPath) then Exit;
+  Diag('Reload flag detected; recycling child');
+  try
+    DeleteFile(FlagPath);
+  except
+    on E: Exception do Diag('Reload flag delete failed: ' + E.Message);
+  end;
+  if GSession <> nil then
+    GSession.RecycleChild;
+end;
+
 procedure RegisterSession;
 var
   Base, WorkspaceFile: string;
@@ -1032,6 +1212,7 @@ begin
       begin
         try
           ReadAndApplySentinel;
+          ReadAndApplyReloadFlag;
         except
           on E: Exception do Diag('Sentinel callback error: ' + E.Message);
         end;
@@ -1230,7 +1411,64 @@ constructor TChildReaderThread.Create(AFromChild, AToClient: TLspStream);
 begin
   FFromChild := AFromChild;
   FToClient := AToClient;
+  FSwallowIds := TList<string>.Create;
   inherited Create(False);
+end;
+
+destructor TChildReaderThread.Destroy;
+begin
+  FSwallowIds.Free;
+  inherited;
+end;
+
+// Register a response ID that the reader should drop on its next sighting,
+// then forget. Used by RecycleChild for the synthetic-init response.
+procedure TChildReaderThread.SwallowResponseId(const Id: string);
+begin
+  TMonitor.Enter(FSwallowIds);
+  try
+    FSwallowIds.Add(Id);
+  finally
+    TMonitor.Exit(FSwallowIds);
+  end;
+end;
+
+function TChildReaderThread.ShouldDrop(const Json: string): Boolean;
+var
+  Root: TJSONValue;
+  Obj: TJSONObject;
+  IdVal: TJSONValue;
+  IdStr: string;
+  Idx: Integer;
+begin
+  Result := False;
+  Root := nil;
+  try
+    try
+      Root := TJSONObject.ParseJSONValue(Json);
+    except
+      Exit;
+    end;
+    if not (Root is TJSONObject) then Exit;
+    Obj := TJSONObject(Root);
+    IdVal := Obj.GetValue('id');
+    if IdVal = nil then Exit;
+    IdStr := IdVal.Value;
+    TMonitor.Enter(FSwallowIds);
+    try
+      Idx := FSwallowIds.IndexOf(IdStr);
+      if Idx >= 0 then
+      begin
+        FSwallowIds.Delete(Idx);
+        Result := True;
+        Diag('Reader dropped replayed-init response (id=' + IdStr + ')');
+      end;
+    finally
+      TMonitor.Exit(FSwallowIds);
+    end;
+  finally
+    Root.Free;
+  end;
 end;
 
 procedure TChildReaderThread.Execute;
@@ -1240,6 +1478,7 @@ begin
   while not Terminated do
   begin
     if not FFromChild.ReadMessage(Json) then Break;
+    if ShouldDrop(Json) then Continue;
     if not FToClient.WriteMessage(Json) then Break;
   end;
   Diag('Child reader thread exiting');
@@ -1247,60 +1486,46 @@ end;
 
 procedure RunProxy;
 var
-  Reader: TChildReaderThread;
   Json, Method, UriToFire: string;
   P: TActiveProject;
 begin
-  Reader := TChildReaderThread.Create(GSession.ChildStream, GSession.ClientOutStream);
-  try
-    Reader.FreeOnTerminate := False;
-    while True do
+  while True do
+  begin
+    if not GSession.ClientStream.ReadMessage(Json) then Break;
+
+    // Lazy hash check: if the active-file watcher marked the project
+    // invalidated, hash now and re-fire didChangeConfiguration only if
+    // the content actually changed.
+    CheckAndApplyInvalidation;
+
+    Method := GetMessageMethod(Json);
+    if Method = 'initialize' then
+      Json := InjectInitOptions(Json);
+    // SendToChild atomically tracks (caches init/initialized, applies
+    // didOpen/Change/Close to FOpenDocs) and forwards to the child.
+    GSession.SendToChild(Json, Method);
+    if Method = 'initialized' then
     begin
-      if not GSession.ClientStream.ReadMessage(Json) then Break;
-
-      // Lazy hash check: if the active-file watcher marked the project
-      // invalidated, hash now and re-fire didChangeConfiguration only if
-      // the content actually changed.
-      CheckAndApplyInvalidation;
-
-      Method := GetMessageMethod(Json);
-      if Method = 'initialize' then
-        Json := InjectInitOptions(Json);
-      // Update session-state mirrors before forwarding (cache init/initialized,
-      // track open documents).
+      UriToFire := '';
+      TMonitor.Enter(GProjectGuard);
       try
-        GSession.TrackOutgoingMessage(Json, Method);
-      except
-        on E: Exception do Diag('TrackOutgoingMessage error: ' + E.Message);
-      end;
-      GSession.WriteToChild(Json);
-      if Method = 'initialized' then
-      begin
-        UriToFire := '';
-        TMonitor.Enter(GProjectGuard);
-        try
-          P := GActiveProject;
-          if (not GSession.DidFireConfig) and (P <> nil) then
-          begin
-            UriToFire := P.Uri;
-            GSession.DidFireConfig := True;
-          end;
-        finally
-          TMonitor.Exit(GProjectGuard);
-        end;
-        if UriToFire <> '' then
+        P := GActiveProject;
+        if (not GSession.DidFireConfig) and (P <> nil) then
         begin
-          GSession.WriteToChild(MakeDidChangeConfigJson(UriToFire));
-          Diag('Sent didChangeConfiguration: ' + UriToFire);
+          UriToFire := P.Uri;
+          GSession.DidFireConfig := True;
         end;
+      finally
+        TMonitor.Exit(GProjectGuard);
+      end;
+      if UriToFire <> '' then
+      begin
+        GSession.WriteToChild(MakeDidChangeConfigJson(UriToFire));
+        Diag('Sent didChangeConfiguration: ' + UriToFire);
       end;
     end;
-    Diag('Client closed stdin');
-  finally
-    Reader.Terminate;
-    Reader.WaitFor;
-    Reader.Free;
   end;
+  Diag('Client closed stdin');
 end;
 
 // Establish the initial active project from `DELPHI_LSP_SETTINGS` env var
