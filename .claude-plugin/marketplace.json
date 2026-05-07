@@ -1,0 +1,14 @@
+{
+  "name": "jareddavison",
+  "owner": {
+    "name": "Jared Davison",
+    "url": "https://github.com/jareddavison"
+  },
+  "plugins": [
+    {
+      "name": "delphi-lsp",
+      "source": "./",
+      "description": "Wires Embarcadero DelphiLSP into Claude Code's code-intelligence system. Hover, goToDefinition, push diagnostics, multi-project picker with sticky pick across resume."
+    }
+  ]
+}

@@ -17,14 +17,23 @@ A Claude Code code-intelligence plugin that wires Embarcadero's DelphiLSP into C
 
 ## Install
 
-Clone and load via `--plugin-dir`:
+Two paths depending on use case.
+
+**For regular use on a machine** (recommended) — install via the bundled marketplace so Claude Code auto-updates the plugin on each new commit:
+
+```text
+/plugin marketplace add https://github.com/jareddavison/delphi-lsp-claude
+/plugin install delphi-lsp@jareddavison
+```
+
+**For local development** — clone and load via `--plugin-dir`:
 
 ```bash
 git clone https://github.com/jareddavison/delphi-lsp-claude
 claude --plugin-dir ./delphi-lsp-claude
 ```
 
-`bin/delphi-lsp-shim.exe` ships precompiled — no Delphi compiler needed to run, only to rebuild (see [Building](#building)).
+Either way, `bin/delphi-lsp-shim.exe` ships precompiled — no Delphi compiler needed to run, only to rebuild (see [Building](#building)).
 
 ## Per-project `.delphilsp.json`
 

@@ -1,6 +1,6 @@
 {
   "name": "delphi-lsp",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Wires Embarcadero DelphiLSP into Claude Code's code-intelligence system for .pas/.dpr/.dpk/.inc files.",
   "license": "MIT",
   "author": { "name": "Jared Davison" },
