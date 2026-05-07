@@ -1714,6 +1714,19 @@ begin
   DumpClaudeEnv;
   DumpArgv;
   GClaudeSessionId := GetEnv('CLAUDE_CODE_SESSION_ID', '');
+  // Reject unsubstituted manifest placeholders — Claude Code 2.1.x doesn't
+  // expand ${CLAUDE_CODE_SESSION_ID} in lspServers.<n>.env (only the
+  // ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA}/${user_config.*} whitelist
+  // substitutes; arbitrary env vars pass through literally). Without this
+  // guard the shim would accept the literal placeholder as a session id
+  // and write sticky to a bogus filename.
+  if (GClaudeSessionId <> '') and
+     ((Pos('${', GClaudeSessionId) > 0) or
+      SameText(GClaudeSessionId, '${CLAUDE_CODE_SESSION_ID}')) then
+  begin
+    Diag('env CLAUDE_CODE_SESSION_ID is unsubstituted placeholder; ignoring');
+    GClaudeSessionId := '';
+  end;
   if GClaudeSessionId <> '' then
     Diag('Claude session id from env: ' + GClaudeSessionId)
   else
