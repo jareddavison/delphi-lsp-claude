@@ -43,7 +43,9 @@ uses
   System.Generics.Defaults,
   DelphiLsp.XmlDecode,
   DelphiLsp.Paths,
-  DelphiLsp.Walkers;
+  DelphiLsp.Walkers,
+  DelphiLsp.Logging,
+  DelphiLsp.LspMessage;
 
 type
   TLspStream = class
@@ -110,15 +112,6 @@ type
     procedure SignalShutdown;
   end;
 
-  // Mirror of one open document on the LSP wire. Maintained by intercepting
-  // textDocument/didOpen, didChange, didClose so we have the data to replay
-  // didOpens to a fresh DelphiLSP child after a /delphi-reload recycle.
-  TOpenDocument = record
-    LanguageId: string;
-    Version: Integer;
-    Text: string;
-  end;
-
   // Encapsulates the LSP-session-scoped state that survives both
   // /delphi-project switches AND /delphi-reload recycles:
   //   - parent stdin/stdout streams (whole shim lifetime)
@@ -182,7 +175,6 @@ type
   end;
 
 var
-  GLogPath: string;
   GSession: TLspSession;              // session-scoped state (streams, child, open docs, init cache)
   GProjectGuard: TObject;             // TMonitor sentinel for GActiveProject access
   GActiveProject: TActiveProject;     // current project (replaceable)
@@ -190,26 +182,6 @@ var
   GActiveSentinelPath: string;        // <session>/active.txt
   GClaudeSessionId: string;           // CLAUDE_CODE_SESSION_ID — stable across resume, '' if absent
   GSessionStatePath: string;          // ${CLAUDE_PLUGIN_DATA}/session-state/<claude-session-id>.json — sticky bindings, survives shim death
-
-procedure Diag(const Msg: string);
-var
-  F: TextFile;
-  Line: string;
-begin
-  if GLogPath = '' then Exit;
-  Line := Format('[%s] %s', [FormatDateTime('yyyy-mm-dd hh:nn:ss.zzz', Now), Msg]);
-  try
-    AssignFile(F, GLogPath);
-    if FileExists(GLogPath) then Append(F) else Rewrite(F);
-    try
-      Writeln(F, Line);
-    finally
-      CloseFile(F);
-    end;
-  except
-    // best effort
-  end;
-end;
 
 function GetEnv(const Name, Default: string): string;
 begin
@@ -652,244 +624,6 @@ begin
 
   Source := 'PATH (no registry match)';
   Result := 'DelphiLSP.exe';
-end;
-
-{ JSON manipulation }
-
-function GetMessageMethod(const Json: string): string;
-var
-  Root: TJSONValue;
-  Obj: TJSONObject;
-  MethodVal: TJSONValue;
-begin
-  Result := '';
-  Root := nil;
-  try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      on E: Exception do
-      begin
-        Diag('JSON parse failed: ' + E.Message);
-        Exit;
-      end;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := Root as TJSONObject;
-    MethodVal := Obj.GetValue('method');
-    if (MethodVal <> nil) and (MethodVal is TJSONString) then
-      Result := TJSONString(MethodVal).Value;
-  finally
-    Root.Free;
-  end;
-end;
-
-function InjectInitOptions(const Json: string): string;
-var
-  Root: TJSONValue;
-  Obj, ParamsObj, InitOpts: TJSONObject;
-  ParamsVal, InitVal, MethodVal: TJSONValue;
-  ServerType: string;
-  AgentCount: Integer;
-  ExistingPair: TJSONPair;
-begin
-  Result := Json;
-  Root := nil;
-  try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := Root as TJSONObject;
-    MethodVal := Obj.GetValue('method');
-    if (MethodVal = nil) or not (MethodVal is TJSONString) or
-       (TJSONString(MethodVal).Value <> 'initialize') then Exit;
-
-    ParamsVal := Obj.GetValue('params');
-    if (ParamsVal = nil) or not (ParamsVal is TJSONObject) then Exit;
-    ParamsObj := ParamsVal as TJSONObject;
-
-    ServerType := GetEnv('DELPHI_LSP_SERVER_TYPE', 'controller');
-    AgentCount := StrToIntDef(GetEnv('DELPHI_LSP_AGENT_COUNT', '2'), 2);
-
-    InitVal := ParamsObj.GetValue('initializationOptions');
-    if (InitVal <> nil) and (InitVal is TJSONObject) then
-    begin
-      InitOpts := InitVal as TJSONObject;
-      if InitOpts.GetValue('serverType') = nil then
-        InitOpts.AddPair('serverType', ServerType);
-      if InitOpts.GetValue('agentCount') = nil then
-        InitOpts.AddPair('agentCount', TJSONNumber.Create(AgentCount));
-    end
-    else
-    begin
-      ExistingPair := ParamsObj.RemovePair('initializationOptions');
-      if ExistingPair <> nil then ExistingPair.Free;
-      InitOpts := TJSONObject.Create;
-      InitOpts.AddPair('serverType', ServerType);
-      InitOpts.AddPair('agentCount', TJSONNumber.Create(AgentCount));
-      ParamsObj.AddPair('initializationOptions', InitOpts);
-    end;
-
-    Result := Obj.ToJSON;
-    Diag(Format('Injected initializationOptions serverType=%s agentCount=%d',
-      [ServerType, AgentCount]));
-  finally
-    Root.Free;
-  end;
-end;
-
-function MakeDidChangeConfigJson(const Uri: string): string;
-var
-  Root, Params, Settings: TJSONObject;
-begin
-  Root := TJSONObject.Create;
-  try
-    Root.AddPair('jsonrpc', '2.0');
-    Root.AddPair('method', 'workspace/didChangeConfiguration');
-    Settings := TJSONObject.Create;
-    Settings.AddPair('settingsFile', Uri);
-    Params := TJSONObject.Create;
-    Params.AddPair('settings', Settings);
-    Root.AddPair('params', Params);
-    Result := Root.ToJSON;
-  finally
-    Root.Free;
-  end;
-end;
-
-// Build a synthesized textDocument/didOpen for the new DelphiLSP child during
-// /delphi-reload replay. Uses the version + text the shim has been mirroring.
-function MakeDidOpenJson(const Uri: string; const Doc: TOpenDocument): string;
-var
-  Root, Params, TextDoc: TJSONObject;
-begin
-  Root := TJSONObject.Create;
-  try
-    Root.AddPair('jsonrpc', '2.0');
-    Root.AddPair('method', 'textDocument/didOpen');
-    TextDoc := TJSONObject.Create;
-    TextDoc.AddPair('uri', Uri);
-    TextDoc.AddPair('languageId', Doc.LanguageId);
-    TextDoc.AddPair('version', TJSONNumber.Create(Doc.Version));
-    TextDoc.AddPair('text', Doc.Text);
-    Params := TJSONObject.Create;
-    Params.AddPair('textDocument', TextDoc);
-    Root.AddPair('params', Params);
-    Result := Root.ToJSON;
-  finally
-    Root.Free;
-  end;
-end;
-
-// Replace the `id` field of a cached LSP request JSON with a synthetic value.
-// Used to rewrite the cached `initialize` request before replaying it to a
-// fresh DelphiLSP child — the original ID was already consumed by the LSP
-// client when the original initialize handshake completed.
-//
-// Uses an Integer (emitted as a JSON number) rather than a string because
-// DelphiLSP doesn't preserve string ids in responses — when sent a request
-// with id="delphi-lsp-shim-replay-1" it responds with id=0 (apparently
-// parseInt-coercing then falling back to 0 on failure), which broke the
-// swallow-list match. Caller picks a distinctive negative number so it
-// won't collide with the LSP client's positive-integer id stream.
-function RewriteInitId(const Json: string; NewId: Integer): string;
-var
-  Root: TJSONValue;
-  Obj: TJSONObject;
-  ExistingPair: TJSONPair;
-begin
-  Result := Json;
-  Root := nil;
-  try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := TJSONObject(Root);
-    ExistingPair := Obj.RemovePair('id');
-    if ExistingPair <> nil then ExistingPair.Free;
-    Obj.AddPair('id', TJSONNumber.Create(NewId));
-    Result := Obj.ToJSON;
-  finally
-    Root.Free;
-  end;
-end;
-
-{ Helpers used by TLspSession.TrackOutgoingMessage }
-
-// LSP positions are zero-indexed line + UTF-16 character offset within line.
-// Walk the text counting line breaks; once at the target line, advance
-// `Character` UTF-16 code units (Delphi `string` is UTF-16 so 1 element per
-// code unit). Handles \r\n, \n, and bare \r line endings.
-function PositionToOffset(const Text: string; Line, Character: Integer): Integer;
-var
-  I, CurrentLine: Integer;
-begin
-  CurrentLine := 0;
-  I := 1;
-  while (I <= Length(Text)) and (CurrentLine < Line) do
-  begin
-    if Text[I] = #13 then
-    begin
-      Inc(CurrentLine);
-      Inc(I);
-      if (I <= Length(Text)) and (Text[I] = #10) then
-        Inc(I);
-    end
-    else if Text[I] = #10 then
-    begin
-      Inc(CurrentLine);
-      Inc(I);
-    end
-    else
-      Inc(I);
-  end;
-  Result := I + Character;
-  if Result > Length(Text) + 1 then Result := Length(Text) + 1;
-  if Result < 1 then Result := 1;
-end;
-
-// Apply one entry of textDocument/didChange's `contentChanges` array.
-// Two shapes per LSP spec: full replace (no `range` field) or incremental
-// (`range` + `text` to splice in).
-procedure ApplyContentChange(var Text: string; const Change: TJSONObject);
-var
-  RangeVal, StartVal, EndVal, TextVal, LineVal, CharVal: TJSONValue;
-  StartLine, StartChar, EndLine, EndChar: Integer;
-  StartOffset, EndOffset: Integer;
-  NewText: string;
-begin
-  TextVal := Change.GetValue('text');
-  if (TextVal = nil) or not (TextVal is TJSONString) then Exit;
-  NewText := TJSONString(TextVal).Value;
-  RangeVal := Change.GetValue('range');
-  if (RangeVal = nil) or not (RangeVal is TJSONObject) then
-  begin
-    Text := NewText;
-    Exit;
-  end;
-  StartVal := TJSONObject(RangeVal).GetValue('start');
-  EndVal := TJSONObject(RangeVal).GetValue('end');
-  if (not (StartVal is TJSONObject)) or (not (EndVal is TJSONObject)) then Exit;
-  LineVal := TJSONObject(StartVal).GetValue('line');
-  CharVal := TJSONObject(StartVal).GetValue('character');
-  if (LineVal = nil) or (CharVal = nil) then Exit;
-  StartLine := StrToIntDef(LineVal.Value, 0);
-  StartChar := StrToIntDef(CharVal.Value, 0);
-  LineVal := TJSONObject(EndVal).GetValue('line');
-  CharVal := TJSONObject(EndVal).GetValue('character');
-  if (LineVal = nil) or (CharVal = nil) then Exit;
-  EndLine := StrToIntDef(LineVal.Value, 0);
-  EndChar := StrToIntDef(CharVal.Value, 0);
-  StartOffset := PositionToOffset(Text, StartLine, StartChar);
-  EndOffset := PositionToOffset(Text, EndLine, EndChar);
-  if EndOffset < StartOffset then EndOffset := StartOffset;
-  Text := Copy(Text, 1, StartOffset - 1) + NewText + Copy(Text, EndOffset, MaxInt);
 end;
 
 { TLspSession }
@@ -1735,45 +1469,6 @@ begin
   Diag(Format('shim pid=%d ppid=%d', [GetCurrentProcessId, GetParentProcessId]));
 end;
 
-// Extract `params.processId` from a JSON-RPC initialize request. Per LSP
-// spec, that's the spawning process's PID — for shims spawned by Claude
-// Code, this should be Claude Code's main PID (or whatever subprocess
-// of Claude Code did the spawn). Returns 0 if the field is missing or
-// not parseable.
-function ExtractInitializeProcessId(const Json: string): DWORD;
-var
-  Root: TJSONValue;
-  Obj, Params: TJSONObject;
-  ParamsVal, MethodVal, PidVal: TJSONValue;
-  PidStr: string;
-  Tmp: Int64;
-begin
-  Result := 0;
-  Root := nil;
-  try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := TJSONObject(Root);
-    MethodVal := Obj.GetValue('method');
-    if (MethodVal = nil) or not (MethodVal is TJSONString) or
-       (TJSONString(MethodVal).Value <> 'initialize') then Exit;
-    ParamsVal := Obj.GetValue('params');
-    if not (ParamsVal is TJSONObject) then Exit;
-    Params := TJSONObject(ParamsVal);
-    PidVal := Params.GetValue('processId');
-    if PidVal = nil then Exit;
-    PidStr := PidVal.Value;
-    if PidStr = '' then Exit;
-    if TryStrToInt64(PidStr, Tmp) and (Tmp > 0) and (Tmp <= High(DWORD)) then
-      Result := DWORD(Tmp);
-  finally
-    Root.Free;
-  end;
-end;
 
 // Scan <plugin-data>/claude-pid/by-id-*.json (deposited by SessionStart
 // hooks), pick the one whose `cwd` field matches our cwd canonically AND
@@ -3188,7 +2883,9 @@ begin
       // us correlate hook output with shim session race-free.
       Diag(Format('initialize.processId=%d (shim ppid=%d)',
         [ExtractInitializeProcessId(Json), GetParentProcessId]));
-      Json := InjectInitOptions(Json);
+      Json := InjectInitOptions(Json,
+        GetEnv('DELPHI_LSP_SERVER_TYPE', 'controller'),
+        StrToIntDef(GetEnv('DELPHI_LSP_AGENT_COUNT', '2'), 2));
     end;
     // SendToChild atomically tracks (caches init/initialized, applies
     // didOpen/Change/Close to FOpenDocs) and forwards to the child.
@@ -3283,7 +2980,7 @@ end;
 var
   SentinelWatcher: TSentinelWatcherThread;
 begin
-  GLogPath := GetEnv('DELPHI_LSP_SHIM_LOG', '');
+  SetLogPath(GetEnv('DELPHI_LSP_SHIM_LOG', ''));
 
   // Dual-mode binary: when invoked with --hook-session-start, behave as the
   // SessionStart hook (read JSON from stdin, persist correlation files,
