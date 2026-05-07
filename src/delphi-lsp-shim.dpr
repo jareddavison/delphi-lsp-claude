@@ -3133,11 +3133,17 @@ end;
 // Extract a value for a `-XX` compiler flag from a dccOptions string.
 // Handles both quoted (`-NU"C:\Some Path"`) and unquoted (`-NU.\Win32\Debug`)
 // forms. Returns '' if not found.
+//
+// The flag must be at the start of dccOptions or preceded by whitespace —
+// prevents accidentally matching `-FOOBAR-NU/path` substrings inside other
+// args. Quoted values can contain spaces; unquoted values run to the next
+// whitespace.
 function ExtractDccFlagValue(const DccOptions, Flag: string): string;
 var
   Match: TMatch;
 begin
-  Match := TRegEx.Match(DccOptions, Flag + '(?:"([^"]+)"|(\S+))', [roIgnoreCase]);
+  Match := TRegEx.Match(DccOptions,
+    '(?:^|\s)' + Flag + '(?:"([^"]+)"|(\S+))', [roIgnoreCase]);
   if not Match.Success then Exit('');
   if (Match.Groups.Count > 1) and Match.Groups[1].Success and
      (Match.Groups[1].Value <> '') then
