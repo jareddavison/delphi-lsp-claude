@@ -1916,18 +1916,18 @@ end;
 // / CLAUDE_PLUGIN_DATA). Verified 2026-05-07. If that changes, env/argv paths
 // take precedence and this function never runs. Coupled to Claude Code's
 // internal storage layout — re-verify if it stops working.
+function ResolveProjectsRoot: string; forward;
+
 function DiscoverSessionIdFromProjectsDir(const Cwd: string): string;
 const
   Suffix = '.jsonl';
 var
-  Home, ProjectsRoot, EncodedCwd, ProjectDir, BestName: string;
+  ProjectsRoot, EncodedCwd, ProjectDir, BestName: string;
   SR: TSearchRec;
   BestAge: TDateTime;
 begin
   Result := '';
-  Home := GetEnv('USERPROFILE', '');
-  if Home = '' then Exit;
-  ProjectsRoot := IncludeTrailingPathDelimiter(Home) + '.claude' + PathDelim + 'projects';
+  ProjectsRoot := ResolveProjectsRoot;
   if not DirectoryExists(ProjectsRoot) then Exit;
 
   EncodedCwd := StringReplace(Cwd, ':', '-', [rfReplaceAll]);
@@ -1964,8 +1964,38 @@ begin
     Diag('Projects-dir scan: no .jsonl in ' + ProjectDir);
 end;
 
+// Locate Claude Code's <data-dir>/projects/. Two strategies:
+//   1. Derive from CLAUDE_PLUGIN_DATA. Per docs, that env var resolves to
+//      <data-dir>/plugins/data/<plugin-id>/, so walking up 3 levels gives
+//      <data-dir>. Authoritative regardless of where Claude Code was
+//      configured to store data — works even if the user has a non-standard
+//      install (CLAUDE_HOME-equivalent override, symlinked layout, etc.).
+//   2. Fall back to $USERPROFILE/.claude/projects (the documented default
+//      location) if CLAUDE_PLUGIN_DATA isn't set or doesn't resolve.
+// Empirically CLAUDE_PLUGIN_DATA IS in the LSP subprocess env on Claude
+// Code 2.1.x, so strategy 1 fires for normal installs.
+function ResolveProjectsRoot: string;
+var
+  PluginData, DataDir: string;
+begin
+  Result := '';
+  PluginData := GetEnv('CLAUDE_PLUGIN_DATA', '');
+  if PluginData <> '' then
+  begin
+    DataDir := ExtractFileDir(ExtractFileDir(ExtractFileDir(
+      ExcludeTrailingPathDelimiter(PluginData))));
+    if (DataDir <> '') and DirectoryExists(DataDir) then
+    begin
+      Result := IncludeTrailingPathDelimiter(DataDir) + 'projects';
+      if DirectoryExists(Result) then Exit;
+    end;
+  end;
+  Result := IncludeTrailingPathDelimiter(GetEnv('USERPROFILE', '')) +
+            '.claude' + PathDelim + 'projects';
+end;
+
 // Test whether a Claude Code session is still resumable by looking for its
-// transcript .jsonl in ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl.
+// transcript .jsonl in <data-dir>/projects/<encoded-cwd>/<session-id>.jsonl.
 // Claude Code keeps the .jsonl as long as the session is in conversation
 // history; once the session is fully removed, the file is gone. Used by GC
 // to decide which session-state and by-id files to delete.
@@ -1976,8 +2006,7 @@ var
 begin
   Result := False;
   if SessionId = '' then Exit;
-  ProjectsRoot := IncludeTrailingPathDelimiter(GetEnv('USERPROFILE', '')) +
-                  '.claude' + PathDelim + 'projects';
+  ProjectsRoot := ResolveProjectsRoot;
   if not DirectoryExists(ProjectsRoot) then Exit;
   if FindFirst(IncludeTrailingPathDelimiter(ProjectsRoot) + '*', faDirectory, SR) = 0 then
   try
@@ -2768,6 +2797,119 @@ begin
   end;
 end;
 
+// Hook mode (--hook-session-end). Counterpart to RunSessionStartHook: fires
+// when Claude Code is ending the session (reason in {clear, resume, logout,
+// prompt_input_exit, bypass_permissions_disabled, other}). Cleans up the
+// per-session correlation drop files so they don't accumulate. The
+// persistent sticky bindings at session-state/<session>.json are left alone
+// — they're what enables next-resume restoration.
+procedure RunSessionEndHook;
+var
+  PayloadBytes: TBytes;
+  Payload, SessionId, Reason: string;
+  Root: TJSONValue;
+  Obj: TJSONObject;
+  IdVal, ReasonVal: TJSONValue;
+  Base, ClaudePidDir, FullPath, FileSessionId, Content: string;
+  Ancestors: TArray<DWORD>;
+  AncIdx: Integer;
+  Removed: Integer;
+  FileRoot: TJSONValue;
+begin
+  PayloadBytes := ReadAllStdin;
+  Payload := TEncoding.UTF8.GetString(PayloadBytes);
+  Diag('SessionEnd: payload bytes=' + IntToStr(Length(PayloadBytes)));
+
+  SessionId := '';
+  Reason := '';
+  Root := nil;
+  try
+    try
+      Root := TJSONObject.ParseJSONValue(Payload);
+    except
+      on E: Exception do Diag('SessionEnd parse failed: ' + E.Message);
+    end;
+    if Root is TJSONObject then
+    begin
+      Obj := TJSONObject(Root);
+      IdVal := Obj.GetValue('session_id');
+      ReasonVal := Obj.GetValue('reason');
+      if IdVal <> nil then SessionId := IdVal.Value;
+      if ReasonVal <> nil then Reason := ReasonVal.Value;
+    end;
+  finally
+    Root.Free;
+  end;
+
+  if SessionId = '' then
+  begin
+    Diag('SessionEnd: no session_id in payload, bailing out');
+    Exit;
+  end;
+  Diag(Format('SessionEnd: session=%s reason=%s', [SessionId, Reason]));
+
+  Base := ResolvePluginDataBase;
+  if Base = '' then Exit;
+  ClaudePidDir := IncludeTrailingPathDelimiter(Base) + 'claude-pid';
+  if not DirectoryExists(ClaudePidDir) then Exit;
+
+  Removed := 0;
+
+  // Delete the by-id drop file — keyed directly by our session.
+  FullPath := IncludeTrailingPathDelimiter(ClaudePidDir) + 'by-id-' + SessionId + '.json';
+  if FileExists(FullPath) then
+  begin
+    if DeleteFile(PChar(FullPath)) then Inc(Removed)
+    else Diag(Format('SessionEnd by-id delete failed: gle=%d', [GetLastError]));
+  end;
+
+  // Walk our own ancestors and delete each PID-keyed drop file whose
+  // recorded session_id matches ours. The session_id check is defensive:
+  // ensures we never accidentally delete another concurrent session's
+  // ancestor files even if PIDs happened to overlap (shouldn't, but cheap
+  // to verify).
+  Ancestors := GetAncestorPids(GetCurrentProcessId);
+  for AncIdx := 0 to High(Ancestors) do
+  begin
+    FullPath := IncludeTrailingPathDelimiter(ClaudePidDir) +
+                IntToStr(Ancestors[AncIdx]) + '.json';
+    if not FileExists(FullPath) then Continue;
+    FileSessionId := '';
+    try
+      Content := TFile.ReadAllText(FullPath, TEncoding.UTF8);
+      FileRoot := nil;
+      try
+        try
+          FileRoot := TJSONObject.ParseJSONValue(Content);
+        except
+          Continue;
+        end;
+        if FileRoot is TJSONObject then
+        begin
+          IdVal := TJSONObject(FileRoot).GetValue('session_id');
+          if IdVal <> nil then FileSessionId := IdVal.Value;
+        end;
+      finally
+        FileRoot.Free;
+      end;
+    except
+      on E: Exception do
+      begin
+        Diag('SessionEnd ancestor-file read failed: ' + E.Message);
+        Continue;
+      end;
+    end;
+    if FileSessionId <> SessionId then Continue;
+    if DeleteFile(PChar(FullPath)) then
+      Inc(Removed)
+    else
+      Diag(Format('SessionEnd ancestor delete failed: %d (gle=%d)',
+        [Ancestors[AncIdx], GetLastError]));
+  end;
+
+  Diag(Format('SessionEnd: removed %d correlation file(s)', [Removed]));
+end;
+
 procedure RunProxy;
 var
   Json, Method, UriToFire: string;
@@ -2907,6 +3049,18 @@ begin
     Halt(0);
   end;
 
+  if (ParamCount >= 1) and SameText(ParamStr(1), '--hook-session-end') then
+  begin
+    Diag('--- delphi-lsp-shim hook-session-end mode ---');
+    try
+      RunSessionEndHook;
+    except
+      on E: Exception do
+        Diag('SessionEnd hook fatal: ' + E.ClassName + ': ' + E.Message);
+    end;
+    Halt(0);
+  end;
+
   Diag('--- delphi-lsp-shim starting ---');
   Diag('CWD: ' + GetCurrentDir);
 
@@ -2917,12 +3071,20 @@ begin
 
   try
     InitSessionState;
-    // GC stale per-session bindings (sessions whose .jsonl is gone) and
-    // stale claude-pid drop files (dead PIDs / dead sessions). Runs once
-    // per shim spawn, after we know GClaudeSessionId so we don't sweep
-    // our own files.
-    GcStaleSessionState;
-    GcStaleClaudePidFiles;
+    // GC stale per-session bindings + claude-pid drop files. Sanity check
+    // first: if we can't even find our OWN session's .jsonl, the projects-dir
+    // probe is fundamentally broken (CLAUDE_HOME override, encoding change,
+    // sync lag, mounted drive missing, etc.) — bail out rather than wipe
+    // every other session's sticky en masse on a false-negative liveness
+    // signal. Same risk applies to claude-pid by-id files (also use
+    // IsClaudeSessionAlive), so guard both together.
+    if (GClaudeSessionId <> '') and IsClaudeSessionAlive(GClaudeSessionId) then
+    begin
+      GcStaleSessionState;
+      GcStaleClaudePidFiles;
+    end
+    else
+      Diag('GC: skipping (own session .jsonl not found or session id unresolved)');
     InitSettings;
 
     RegisterSession;

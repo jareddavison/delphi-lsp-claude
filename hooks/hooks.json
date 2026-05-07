@@ -19,6 +19,17 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/delphi-lsp-shim.exe\" --hook-session-end"
+          }
+        ]
+      }
     ]
   }
 }
