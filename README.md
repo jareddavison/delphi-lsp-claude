@@ -108,6 +108,19 @@ Cleanup:
 | `DELPHI_LSP_SETTINGS` | *(sticky → single-candidate → none)* | Explicit `.delphilsp.json` path; bypasses sticky/auto-pick chain. |
 | `DELPHI_LSP_SHIM_LOG` | *(disabled)* | Append shim diagnostics to this file. |
 
+## Branches & releases
+
+`main` is the **published** branch — Claude Code's marketplace auto-pulls from it on every restart, so anything pushed here goes live to all users immediately. Don't merge to `main` unless you've tested the change end-to-end.
+
+Work on `dev` (or topic branches off `dev`) for in-progress changes. When ready to release:
+
+1. Merge `dev` → `main` (fast-forward or squash, your call).
+2. Bump `version` in `.claude-plugin/plugin.json` (semver — patch for fixes, minor for features, major for breaking).
+3. Tag the `main` HEAD as `vX.Y.Z` and push the tag (`git tag v0.6.0 && git push origin v0.6.0`).
+4. Push `main`.
+
+Users on the marketplace get the new version on next Claude Code restart. If something turns out to be broken, revert `main` to the previous tag and push.
+
 ## Building
 
 ```bash
