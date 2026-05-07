@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Jared Davison. Released under the MIT License (see LICENSE).
+//
+// AI-generated (Claude Code). Review before trusting in production.
+
 unit DelphiLsp.WalkersTests;
 
 interface

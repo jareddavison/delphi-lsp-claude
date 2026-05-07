@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Jared Davison. Released under the MIT License (see LICENSE).
+//
+// AI-generated (Claude Code). Review before trusting in production.
+//
 // Path manipulation helpers used across the shim. All pure functions —
 // no filesystem access, no global state.
 

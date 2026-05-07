@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Jared Davison. Released under the MIT License (see LICENSE).
+//
+// AI-generated (Claude Code). Review before trusting in production.
+//
 // Bounded recursive file collector with workspace-friendly skip rules.
 // Replaces the duplicated CollectSettingsFiles / CollectDprojs / etc. that
 // each had their own copy of the depth + skip logic.

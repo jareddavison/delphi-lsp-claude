@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Jared Davison. Released under the MIT License (see LICENSE).
+//
+// AI-generated (Claude Code). Review before trusting in production.
+//
 // Decodes the five named XML entities (&amp; &lt; &gt; &quot; &apos;) plus
 // numeric character references (&#NN; / &#xNN;). Stray ampersands and
 // unknown entities pass through literally.

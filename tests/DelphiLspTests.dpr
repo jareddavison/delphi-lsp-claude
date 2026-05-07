@@ -3,6 +3,13 @@ program DelphiLspTests;
 {$APPTYPE CONSOLE}
 {$STRONGLINKTYPES ON}
 
+// Copyright (c) 2026 Jared Davison. Released under the MIT License (see LICENSE).
+//
+// AI-generated (Claude Code). Review before trusting in production.
+//
+// DUnitX runner for the extracted DelphiLsp.* units. Build via
+// tests/build-and-run.bat.
+
 uses
   System.SysUtils,
   DUnitX.Loggers.Console,
