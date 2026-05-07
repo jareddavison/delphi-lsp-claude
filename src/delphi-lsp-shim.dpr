@@ -2826,6 +2826,137 @@ begin
   end;
 end;
 
+// Walk a workspace dir collecting `.dproj` files. Same depth/skip rules as
+// CollectSettingsFiles so multi-project repos don't recurse into build
+// output, history, etc.
+procedure CollectDprojs(const Dir: string; Depth: Integer; Acc: TList<string>);
+const
+  MaxDepth = 6;
+var
+  SR: TSearchRec;
+  FullPath, NameLower: string;
+  Skip: Boolean;
+begin
+  if Depth > MaxDepth then Exit;
+  if FindFirst(IncludeTrailingPathDelimiter(Dir) + '*', faAnyFile, SR) = 0 then
+  try
+    repeat
+      if (SR.Name = '.') or (SR.Name = '..') then Continue;
+      NameLower := LowerCase(SR.Name);
+      Skip := (Length(SR.Name) > 0) and (SR.Name[1] = '.');
+      if not Skip then
+        Skip := (NameLower = 'node_modules') or (NameLower = '__history') or
+                (NameLower = '__recovery') or (NameLower = 'win32') or
+                (NameLower = 'win64') or (NameLower = '.git') or (NameLower = '.svn');
+      if Skip then Continue;
+      FullPath := IncludeTrailingPathDelimiter(Dir) + SR.Name;
+      if (SR.Attr and faDirectory) <> 0 then
+        CollectDprojs(FullPath, Depth + 1, Acc)
+      else if NameLower.EndsWith('.dproj') then
+        Acc.Add(FullPath);
+    until FindNext(SR) <> 0;
+  finally
+    FindClose(SR);
+  end;
+end;
+
+// For a given .pas (or .inc/.dpr/.dpk) absolute path, scan workspace .dproj
+// files for `<DCCReference Include="<rel-path>"/>` entries and return the
+// `.delphilsp.json` paths of any project that references it. Path comparison
+// is case-insensitive after slash normalization. Returns 0/1/N owners —
+// caller decides whether 1 is unique-enough to act on.
+function FindOwningDelphilspJsons(const PasPath: string): TArray<string>;
+var
+  Dprojs: TList<string>;
+  Owners: TList<string>;
+  DprojPath, DprojDir, Content, RefPath, AbsRef, DelphilspPath: string;
+  Matches: TMatchCollection;
+  M: TMatch;
+  TargetCanon, RefCanon: string;
+  I: Integer;
+begin
+  Dprojs := TList<string>.Create;
+  Owners := TList<string>.Create;
+  try
+    CollectDprojs(GetCurrentDir, 0, Dprojs);
+    TargetCanon := LowerCase(StringReplace(PasPath, '\', '/', [rfReplaceAll]));
+    for I := 0 to Dprojs.Count - 1 do
+    begin
+      DprojPath := Dprojs[I];
+      DprojDir := ExtractFilePath(DprojPath);
+      try
+        Content := TFile.ReadAllText(DprojPath, TEncoding.UTF8);
+      except
+        on E: Exception do
+        begin
+          Diag(Format('FindOwning: read failed for %s: %s', [DprojPath, E.Message]));
+          Continue;
+        end;
+      end;
+      Matches := TRegEx.Matches(Content, '<DCCReference\s+Include="([^"]+)"', [roIgnoreCase]);
+      for M in Matches do
+      begin
+        if M.Groups.Count < 2 then Continue;
+        RefPath := M.Groups[1].Value;
+        AbsRef := TPath.GetFullPath(TPath.Combine(DprojDir, RefPath));
+        RefCanon := LowerCase(StringReplace(AbsRef, '\', '/', [rfReplaceAll]));
+        if RefCanon = TargetCanon then
+        begin
+          DelphilspPath := ChangeFileExt(DprojPath, '.delphilsp.json');
+          if FileExists(DelphilspPath) and (Owners.IndexOf(DelphilspPath) < 0) then
+            Owners.Add(DelphilspPath);
+          Break; // one match per .dproj is enough
+        end;
+      end;
+    end;
+    Result := Owners.ToArray;
+  finally
+    Dprojs.Free;
+    Owners.Free;
+  end;
+end;
+
+// `--find-project-for <abspath>` argv mode. Prints the unique owning
+// .delphilsp.json on stdout (exit 0), or lists multi/none on stderr
+// (exit 1). Building block for hook-time picker enrichment, future
+// auto-pick at didOpen, or user-invoked debugging.
+procedure RunFindProjectForMode;
+var
+  Query: string;
+  Owners: TArray<string>;
+  I: Integer;
+begin
+  if ParamCount < 2 then
+  begin
+    Writeln(ErrOutput, 'Usage: delphi-lsp-shim.exe --find-project-for <path-to-pas-file>');
+    Halt(1);
+  end;
+  Query := ParamStr(2);
+  if not TPath.IsPathRooted(Query) then
+    Query := TPath.Combine(GetCurrentDir, Query);
+  Query := TPath.GetFullPath(Query);
+  Diag(Format('FindProjectFor: query=%s cwd=%s', [Query, GetCurrentDir]));
+
+  Owners := FindOwningDelphilspJsons(Query);
+  Diag(Format('FindProjectFor: %d match(es)', [Length(Owners)]));
+
+  if Length(Owners) = 1 then
+  begin
+    Writeln(Owners[0]);
+    Halt(0);
+  end;
+  if Length(Owners) > 1 then
+  begin
+    Writeln(ErrOutput, Format('Ambiguous: %d projects reference %s:',
+      [Length(Owners), Query]));
+    for I := 0 to High(Owners) do
+      Writeln(ErrOutput, '  ' + Owners[I]);
+  end
+  else
+    Writeln(ErrOutput, 'No project references ' + Query);
+  Halt(1);
+end;
+
 // Hook mode (--hook-session-end). Counterpart to RunSessionStartHook: fires
 // when Claude Code is ending the session (reason in {clear, resume, logout,
 // prompt_input_exit, bypass_permissions_disabled, other}). Cleans up the
@@ -3088,6 +3219,21 @@ begin
         Diag('SessionEnd hook fatal: ' + E.ClassName + ': ' + E.Message);
     end;
     Halt(0);
+  end;
+
+  if (ParamCount >= 1) and SameText(ParamStr(1), '--find-project-for') then
+  begin
+    Diag('--- delphi-lsp-shim find-project-for mode ---');
+    try
+      RunFindProjectForMode;  // halts internally
+    except
+      on E: Exception do
+      begin
+        Diag('FindProjectFor fatal: ' + E.ClassName + ': ' + E.Message);
+        Halt(1);
+      end;
+    end;
+    Halt(1); // unreachable
   end;
 
   Diag('--- delphi-lsp-shim starting ---');
