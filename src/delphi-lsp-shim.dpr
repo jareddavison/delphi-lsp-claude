@@ -42,7 +42,8 @@ uses
   System.Generics.Collections,
   System.Generics.Defaults,
   DelphiLsp.XmlDecode,
-  DelphiLsp.Paths;
+  DelphiLsp.Paths,
+  DelphiLsp.Walkers;
 
 type
   TLspStream = class
@@ -351,37 +352,6 @@ end;
 
 { Settings file helpers }
 
-procedure CollectSettingsFiles(const Dir: string; Depth: Integer; Acc: TList<string>);
-const
-  MaxDepth = 6;
-var
-  SR: TSearchRec;
-  FullPath, NameLower: string;
-  Skip: Boolean;
-begin
-  if Depth > MaxDepth then Exit;
-  if FindFirst(IncludeTrailingPathDelimiter(Dir) + '*', faAnyFile, SR) = 0 then
-  try
-    repeat
-      if (SR.Name = '.') or (SR.Name = '..') then Continue;
-      NameLower := LowerCase(SR.Name);
-      Skip := (Length(SR.Name) > 0) and (SR.Name[1] = '.');
-      if not Skip then
-        Skip := (NameLower = 'node_modules') or (NameLower = '__history') or
-                (NameLower = '__recovery') or (NameLower = 'win32') or
-                (NameLower = 'win64') or (NameLower = '.git') or (NameLower = '.svn');
-      if Skip then Continue;
-      FullPath := IncludeTrailingPathDelimiter(Dir) + SR.Name;
-      if (SR.Attr and faDirectory) <> 0 then
-        CollectSettingsFiles(FullPath, Depth + 1, Acc)
-      else if NameLower.EndsWith('.delphilsp.json') then
-        Acc.Add(FullPath);
-    until FindNext(SR) <> 0;
-  finally
-    FindClose(SR);
-  end;
-end;
-
 function FindSettingsFile(const Root: string): string;
 var
   Acc: TList<string>;
@@ -389,7 +359,7 @@ begin
   Result := '';
   Acc := TList<string>.Create;
   try
-    CollectSettingsFiles(Root, 0, Acc);
+    CollectFilesByExt(Root, '.delphilsp.json', 0, Acc);
     if Acc.Count = 0 then Exit;
     Acc.Sort(TComparer<string>.Construct(
       function(const A, B: string): Integer
@@ -2883,7 +2853,7 @@ begin
 
   Acc := TList<string>.Create;
   try
-    CollectSettingsFiles(Cwd, 0, Acc);
+    CollectFilesByExt(Cwd, '.delphilsp.json', 0, Acc);
     Diag(Format('Hook: sticky=no candidates=%d', [Acc.Count]));
     if Acc.Count > 1 then
     begin
@@ -2898,39 +2868,6 @@ begin
   end;
 end;
 
-// Walk a workspace dir collecting `.dproj` files. Same depth/skip rules as
-// CollectSettingsFiles so multi-project repos don't recurse into build
-// output, history, etc.
-procedure CollectDprojs(const Dir: string; Depth: Integer; Acc: TList<string>);
-const
-  MaxDepth = 6;
-var
-  SR: TSearchRec;
-  FullPath, NameLower: string;
-  Skip: Boolean;
-begin
-  if Depth > MaxDepth then Exit;
-  if FindFirst(IncludeTrailingPathDelimiter(Dir) + '*', faAnyFile, SR) = 0 then
-  try
-    repeat
-      if (SR.Name = '.') or (SR.Name = '..') then Continue;
-      NameLower := LowerCase(SR.Name);
-      Skip := (Length(SR.Name) > 0) and (SR.Name[1] = '.');
-      if not Skip then
-        Skip := (NameLower = 'node_modules') or (NameLower = '__history') or
-                (NameLower = '__recovery') or (NameLower = 'win32') or
-                (NameLower = 'win64') or (NameLower = '.git') or (NameLower = '.svn');
-      if Skip then Continue;
-      FullPath := IncludeTrailingPathDelimiter(Dir) + SR.Name;
-      if (SR.Attr and faDirectory) <> 0 then
-        CollectDprojs(FullPath, Depth + 1, Acc)
-      else if NameLower.EndsWith('.dproj') then
-        Acc.Add(FullPath);
-    until FindNext(SR) <> 0;
-  finally
-    FindClose(SR);
-  end;
-end;
 
 // For a given .pas (or .inc/.dpr/.dpk) absolute path, scan workspace .dproj
 // files for `<DCCReference Include="<rel-path>"/>` entries and return the
@@ -2950,7 +2887,7 @@ begin
   Dprojs := TList<string>.Create;
   Owners := TList<string>.Create;
   try
-    CollectDprojs(GetCurrentDir, 0, Dprojs);
+    CollectFilesByExt(GetCurrentDir, '.dproj', 0, Dprojs);
     TargetCanon := LowerCase(StringReplace(PasPath, '\', '/', [rfReplaceAll]));
     for I := 0 to Dprojs.Count - 1 do
     begin
@@ -3321,7 +3258,7 @@ begin
 
   Acc := TList<string>.Create;
   try
-    CollectSettingsFiles(GetCurrentDir, 0, Acc);
+    CollectFilesByExt(GetCurrentDir, '.delphilsp.json', 0, Acc);
     if Acc.Count = 0 then
     begin
       Diag('No .delphilsp.json found in workspace');
