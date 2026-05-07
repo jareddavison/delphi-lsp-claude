@@ -6,8 +6,11 @@ obj/
 *.tvsconfig
 *.local
 
-# Renamed-aside exe when rebuilding while the shim is running
-*.exe.inuse
+# Renamed-aside exe when rebuilding while the shim is running.
+# The trailing * catches the .inuse2/.inuse3/... suffixes that pile up
+# during back-to-back rebuilds (Windows holds the file open until the
+# child process exits, so each rebuild needs its own rename target).
+*.exe.inuse*
 
 # Delphi IDE backups
 __history/
