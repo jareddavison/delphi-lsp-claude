@@ -1964,6 +1964,131 @@ begin
     Diag('Projects-dir scan: no .jsonl in ' + ProjectDir);
 end;
 
+// Test whether a Claude Code session is still resumable by looking for its
+// transcript .jsonl in ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl.
+// Claude Code keeps the .jsonl as long as the session is in conversation
+// history; once the session is fully removed, the file is gone. Used by GC
+// to decide which session-state and by-id files to delete.
+function IsClaudeSessionAlive(const SessionId: string): Boolean;
+var
+  ProjectsRoot, ProjDir, JsonlPath: string;
+  SR: TSearchRec;
+begin
+  Result := False;
+  if SessionId = '' then Exit;
+  ProjectsRoot := IncludeTrailingPathDelimiter(GetEnv('USERPROFILE', '')) +
+                  '.claude' + PathDelim + 'projects';
+  if not DirectoryExists(ProjectsRoot) then Exit;
+  if FindFirst(IncludeTrailingPathDelimiter(ProjectsRoot) + '*', faDirectory, SR) = 0 then
+  try
+    repeat
+      if (SR.Name = '.') or (SR.Name = '..') then Continue;
+      if (SR.Attr and faDirectory) = 0 then Continue;
+      ProjDir := IncludeTrailingPathDelimiter(ProjectsRoot) + SR.Name;
+      JsonlPath := IncludeTrailingPathDelimiter(ProjDir) + SessionId + '.jsonl';
+      if FileExists(JsonlPath) then
+      begin
+        Result := True;
+        Exit;
+      end;
+    until FindNext(SR) <> 0;
+  finally
+    FindClose(SR);
+  end;
+end;
+
+// Sweep <plugin-data>/session-state/<id>.json for sessions whose .jsonl is
+// gone. Conservative — keeps anything that might still be resumable. Skips
+// the current session's bindings (never GC ourselves).
+procedure GcStaleSessionState;
+var
+  Base, Dir, FullPath, SessionId: string;
+  SR: TSearchRec;
+  Removed: Integer;
+begin
+  Base := ResolvePluginDataBase;
+  if Base = '' then Exit;
+  Dir := IncludeTrailingPathDelimiter(Base) + 'session-state';
+  if not DirectoryExists(Dir) then Exit;
+  Removed := 0;
+  if FindFirst(IncludeTrailingPathDelimiter(Dir) + '*.json', faAnyFile, SR) = 0 then
+  try
+    repeat
+      if (SR.Attr and faDirectory) <> 0 then Continue;
+      SessionId := ChangeFileExt(SR.Name, '');
+      if SameText(SessionId, GClaudeSessionId) then Continue;
+      if IsClaudeSessionAlive(SessionId) then Continue;
+      FullPath := IncludeTrailingPathDelimiter(Dir) + SR.Name;
+      if DeleteFile(PChar(FullPath)) then
+        Inc(Removed)
+      else
+        Diag(Format('GC sticky delete failed: %s (gle=%d)', [SR.Name, GetLastError]));
+    until FindNext(SR) <> 0;
+  finally
+    FindClose(SR);
+  end;
+  if Removed > 0 then
+    Diag(Format('GC: removed %d stale session-state file(s)', [Removed]));
+end;
+
+// Sweep <plugin-data>/claude-pid/. Two file kinds:
+//   <pid>.json: hook ancestor drop file. GC if PID is no longer running —
+//     PID-reuse safety: stale entries could otherwise resolve to a wrong
+//     session if a future Claude Code instance happens to inherit that PID.
+//   by-id-<session-id>.json: GC if the session's .jsonl is gone.
+procedure GcStaleClaudePidFiles;
+const
+  ByIdPrefix = 'by-id-';
+  PROCESS_QUERY_LIMITED_INFORMATION = $1000;
+var
+  Base, Dir, FullPath, BaseName, SessionId: string;
+  SR: TSearchRec;
+  Pid: UInt32;
+  H: THandle;
+  Removed: Integer;
+begin
+  Base := ResolvePluginDataBase;
+  if Base = '' then Exit;
+  Dir := IncludeTrailingPathDelimiter(Base) + 'claude-pid';
+  if not DirectoryExists(Dir) then Exit;
+  Removed := 0;
+  if FindFirst(IncludeTrailingPathDelimiter(Dir) + '*.json', faAnyFile, SR) = 0 then
+  try
+    repeat
+      if (SR.Attr and faDirectory) <> 0 then Continue;
+      BaseName := ChangeFileExt(SR.Name, '');
+      FullPath := IncludeTrailingPathDelimiter(Dir) + SR.Name;
+      if (Length(BaseName) > Length(ByIdPrefix)) and
+         SameText(Copy(BaseName, 1, Length(ByIdPrefix)), ByIdPrefix) then
+      begin
+        SessionId := Copy(BaseName, Length(ByIdPrefix) + 1, MaxInt);
+        if IsClaudeSessionAlive(SessionId) then Continue;
+        if DeleteFile(PChar(FullPath)) then
+          Inc(Removed)
+        else
+          Diag(Format('GC by-id delete failed: %s (gle=%d)', [SR.Name, GetLastError]));
+      end
+      else if TryStrToUInt(BaseName, Pid) then
+      begin
+        H := OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, Pid);
+        if H <> 0 then
+        begin
+          CloseHandle(H);
+          Continue;
+        end;
+        if DeleteFile(PChar(FullPath)) then
+          Inc(Removed)
+        else
+          Diag(Format('GC pid-keyed delete failed: %s (gle=%d)', [SR.Name, GetLastError]));
+      end;
+    until FindNext(SR) <> 0;
+  finally
+    FindClose(SR);
+  end;
+  if Removed > 0 then
+    Diag(Format('GC: removed %d stale claude-pid file(s)', [Removed]));
+end;
+
 procedure InitSessionState;
 var
   Base, FromArg, FromScan: string;
@@ -2792,6 +2917,12 @@ begin
 
   try
     InitSessionState;
+    // GC stale per-session bindings (sessions whose .jsonl is gone) and
+    // stale claude-pid drop files (dead PIDs / dead sessions). Runs once
+    // per shim spawn, after we know GClaudeSessionId so we don't sweep
+    // our own files.
+    GcStaleSessionState;
+    GcStaleClaudePidFiles;
     InitSettings;
 
     RegisterSession;
