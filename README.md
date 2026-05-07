@@ -107,4 +107,15 @@ build.bat
 
 Picks the highest installed RAD Studio (`C:\Program Files (x86)\Embarcadero\Studio\<X.Y>\` with `bin\dcc64.exe` + `bin\rsvars.bat`); override via `BDS_VERSION=37.0`. Output: `bin\delphi-lsp-shim.exe` — statically linked, no runtime dependencies beyond `DelphiLSP.exe` itself. Compile time ~0.1s.
 
-If the shim is currently running, rename `bin\delphi-lsp-shim.exe` to `bin\delphi-lsp-shim.exe.inuse` first; the `.exe.inuse*` pattern is gitignored. (Or just close Claude Code, which terminates the shim.)
+If the shim is currently running, rename `bin\delphi-lsp-shim.exe` to `bin\delphi-lsp-shim.exe.inuse` first; the `.exe.inuse*` pattern is gitignored. (Or just run `/delphi-shim-reload` from inside Claude Code — exits the shim and Claude Code auto-respawns it lazily on the next LSP query, picking up whatever binary is on disk now.)
+
+## License & trademarks
+
+Source code in this repository is released under the MIT License (see `LICENSE`).
+
+Trademark notice — this project is not affiliated with, endorsed by, or sponsored by either organization:
+
+- **Claude**, **Claude Code**, and the Anthropic logo are trademarks of Anthropic, PBC.
+- **Delphi**, **DelphiLSP**, **RAD Studio**, and **Embarcadero** are trademarks of Embarcadero Technologies, Inc. (an Idera, Inc. company).
+
+The names appear in this README, package metadata, and source code purely as descriptive references to the products this plugin interoperates with (nominative fair use). Users are responsible for holding their own valid Delphi license to run `DelphiLSP.exe`.
