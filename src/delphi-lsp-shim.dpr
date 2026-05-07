@@ -35,6 +35,8 @@ uses
   System.JSON,
   System.SyncObjs,
   System.Hash,
+  System.RegularExpressions,
+  System.Win.Registry,
   System.Generics.Collections,
   System.Generics.Defaults;
 
@@ -420,6 +422,240 @@ begin
   end;
 end;
 
+{ DelphiLSP path resolution — registry walking + .delphilsp.json hinting }
+
+// Read RootDir for a specific BDS version from the registry. Tries the
+// 32-bit Wow6432Node hive first (RAD Studio is a 32-bit app, installer puts
+// keys there on x64 Windows), then the bare HKLM, then HKCU. Returns
+// '' if not found. Result has its trailing path delimiter stripped for
+// consistent concatenation by callers.
+function FindBdsRootDir(const Version: string): string;
+var
+  Reg: TRegistry;
+
+  function TryRead(Root: HKEY; const KeyPath: string): string;
+  begin
+    Result := '';
+    Reg.RootKey := Root;
+    if Reg.OpenKeyReadOnly(KeyPath) then
+    try
+      if Reg.ValueExists('RootDir') then
+        Result := Reg.ReadString('RootDir');
+    finally
+      Reg.CloseKey;
+    end;
+  end;
+
+begin
+  Result := '';
+  Reg := TRegistry.Create(KEY_READ);
+  try
+    Result := TryRead(HKEY_LOCAL_MACHINE, 'SOFTWARE\Wow6432Node\Embarcadero\BDS\' + Version);
+    if Result = '' then
+      Result := TryRead(HKEY_LOCAL_MACHINE, 'SOFTWARE\Embarcadero\BDS\' + Version);
+    if Result = '' then
+      Result := TryRead(HKEY_CURRENT_USER, 'Software\Embarcadero\BDS\' + Version);
+  finally
+    Reg.Free;
+  end;
+  if Result <> '' then
+    Result := ExcludeTrailingPathDelimiter(Result);
+end;
+
+function CompareBdsVersions(const A, B: string): Integer;
+var
+  AParts, BParts: TArray<string>;
+  AMaj, AMin, BMaj, BMin: Integer;
+begin
+  AParts := A.Split(['.']);
+  BParts := B.Split(['.']);
+  AMaj := 0; AMin := 0; BMaj := 0; BMin := 0;
+  if Length(AParts) > 0 then AMaj := StrToIntDef(AParts[0], 0);
+  if Length(AParts) > 1 then AMin := StrToIntDef(AParts[1], 0);
+  if Length(BParts) > 0 then BMaj := StrToIntDef(BParts[0], 0);
+  if Length(BParts) > 1 then BMin := StrToIntDef(BParts[1], 0);
+  if AMaj <> BMaj then Exit(AMaj - BMaj);
+  Result := AMin - BMin;
+end;
+
+procedure CollectBdsVersionsFrom(Root: HKEY; const KeyPath: string; Acc: TStringList);
+var
+  Reg: TRegistry;
+begin
+  Reg := TRegistry.Create(KEY_READ);
+  try
+    Reg.RootKey := Root;
+    if Reg.OpenKeyReadOnly(KeyPath) then
+    try
+      Reg.GetKeyNames(Acc);
+    finally
+      Reg.CloseKey;
+    end;
+  finally
+    Reg.Free;
+  end;
+end;
+
+// Enumerate every BDS version registered on this machine that has both a
+// resolvable RootDir and a DelphiLSP.exe under it, return the highest.
+// `RootDir` out param has trailing path delimiter stripped.
+function FindHighestBdsVersion(out RootDir: string): string;
+var
+  Versions: TStringList;
+  I: Integer;
+  V, BestVer, ThisRoot, ExePath: string;
+begin
+  Result := '';
+  RootDir := '';
+  Versions := TStringList.Create;
+  try
+    Versions.Sorted := True;
+    Versions.Duplicates := dupIgnore;
+    CollectBdsVersionsFrom(HKEY_LOCAL_MACHINE, 'SOFTWARE\Wow6432Node\Embarcadero\BDS', Versions);
+    CollectBdsVersionsFrom(HKEY_LOCAL_MACHINE, 'SOFTWARE\Embarcadero\BDS', Versions);
+    CollectBdsVersionsFrom(HKEY_CURRENT_USER, 'Software\Embarcadero\BDS', Versions);
+    BestVer := '';
+    for I := 0 to Versions.Count - 1 do
+    begin
+      V := Versions[I];
+      // Skip non-version subkeys (e.g. 'Globals')
+      if not TRegEx.IsMatch(V, '^\d+\.\d+$') then Continue;
+      ThisRoot := FindBdsRootDir(V);
+      if ThisRoot = '' then Continue;
+      ExePath := IncludeTrailingPathDelimiter(ThisRoot) + 'bin\DelphiLSP.exe';
+      if not FileExists(ExePath) then Continue;
+      if (BestVer = '') or (CompareBdsVersions(V, BestVer) > 0) then
+      begin
+        BestVer := V;
+        RootDir := ThisRoot;
+      end;
+    end;
+    Result := BestVer;
+  finally
+    Versions.Free;
+  end;
+end;
+
+// Scan a `.delphilsp.json` file for any embedded BDS version (e.g.
+// `studio/37.0/`, `BDS/37.0/`, paths under `Studio\37.0\`). Returns the
+// X.Y form, or '' if no match. The IDE that wrote the .delphilsp.json
+// embedded its install version in numerous places; any one will do.
+function ExtractBdsVersionFromSettings(const Path: string): string;
+var
+  Content: string;
+  Match: TMatch;
+begin
+  Result := '';
+  if (Path = '') or (not FileExists(Path)) then Exit;
+  try
+    Content := TFile.ReadAllText(Path, TEncoding.UTF8);
+  except
+    on E: Exception do
+    begin
+      Diag('ExtractBdsVersionFromSettings read failed: ' + E.Message);
+      Exit;
+    end;
+  end;
+  Match := TRegEx.Match(Content, '(?i)(?:studio|bds)[/\\]+(\d+\.\d+)');
+  if Match.Success then
+    Result := Match.Groups[1].Value;
+end;
+
+// Resolution order for which DelphiLSP.exe to spawn:
+//   1. DELPHI_LSP_EXE env var (explicit absolute path or PATH name)
+//   2. <session>/runtime.txt (set by /delphi-runtime; version "37.0" or full path)
+//   3. Version hinted by the active .delphilsp.json (the IDE that wrote it)
+//   4. Highest installed BDS with DelphiLSP.exe under bin/
+//   5. Bare 'DelphiLSP.exe' (relies on PATH)
+// `Source` describes which rule won, for the spawn-time log line.
+function ResolveDelphiLspPath(const SettingsPath, SessionDir: string; out Source: string): string;
+var
+  Override_, RuntimePath, RuntimeContent, VerHint, Root, HighestVer: string;
+  Lines: TStringList;
+begin
+  Source := '';
+
+  Override_ := GetEnv('DELPHI_LSP_EXE', '');
+  if Override_ <> '' then
+  begin
+    Source := 'DELPHI_LSP_EXE';
+    Exit(Override_);
+  end;
+
+  if SessionDir <> '' then
+  begin
+    RuntimePath := IncludeTrailingPathDelimiter(SessionDir) + 'runtime.txt';
+    if FileExists(RuntimePath) then
+    begin
+      RuntimeContent := '';
+      Lines := TStringList.Create;
+      try
+        try
+          Lines.LoadFromFile(RuntimePath, TEncoding.UTF8);
+          if Lines.Count > 0 then RuntimeContent := Trim(Lines[0]);
+        except
+          on E: Exception do Diag('runtime.txt read failed: ' + E.Message);
+        end;
+      finally
+        Lines.Free;
+      end;
+      if RuntimeContent <> '' then
+      begin
+        if (Pos('\', RuntimeContent) > 0) or (Pos('/', RuntimeContent) > 0) or
+           SameText(ExtractFileExt(RuntimeContent), '.exe') then
+        begin
+          Source := 'runtime.txt:path';
+          Exit(RuntimeContent);
+        end;
+        Root := FindBdsRootDir(RuntimeContent);
+        if Root <> '' then
+        begin
+          Result := IncludeTrailingPathDelimiter(Root) + 'bin\DelphiLSP.exe';
+          if FileExists(Result) then
+          begin
+            Source := 'runtime.txt:version=' + RuntimeContent;
+            Exit;
+          end;
+        end;
+        Diag('runtime.txt version not resolvable: ' + RuntimeContent);
+      end;
+    end;
+  end;
+
+  if SettingsPath <> '' then
+  begin
+    VerHint := ExtractBdsVersionFromSettings(SettingsPath);
+    if VerHint <> '' then
+    begin
+      Root := FindBdsRootDir(VerHint);
+      if Root <> '' then
+      begin
+        Result := IncludeTrailingPathDelimiter(Root) + 'bin\DelphiLSP.exe';
+        if FileExists(Result) then
+        begin
+          Source := Format('hinted by %s (BDS %s)', [ExtractFileName(SettingsPath), VerHint]);
+          Exit;
+        end;
+      end;
+      Diag(Format('Settings hinted BDS %s but DelphiLSP.exe not found', [VerHint]));
+    end;
+  end;
+
+  HighestVer := FindHighestBdsVersion(Root);
+  if (HighestVer <> '') and (Root <> '') then
+  begin
+    Result := IncludeTrailingPathDelimiter(Root) + 'bin\DelphiLSP.exe';
+    if FileExists(Result) then
+    begin
+      Source := Format('highest installed (BDS %s)', [HighestVer]);
+      Exit;
+    end;
+  end;
+
+  Source := 'PATH (no registry match)';
+  Result := 'DelphiLSP.exe';
+end;
+
 { JSON manipulation }
 
 function GetMessageMethod(const Json: string): string;
@@ -554,7 +790,14 @@ end;
 // Used to rewrite the cached `initialize` request before replaying it to a
 // fresh DelphiLSP child — the original ID was already consumed by the LSP
 // client when the original initialize handshake completed.
-function RewriteInitId(const Json, NewId: string): string;
+//
+// Uses an Integer (emitted as a JSON number) rather than a string because
+// DelphiLSP doesn't preserve string ids in responses — when sent a request
+// with id="delphi-lsp-shim-replay-1" it responds with id=0 (apparently
+// parseInt-coercing then falling back to 0 on failure), which broke the
+// swallow-list match. Caller picks a distinctive negative number so it
+// won't collide with the LSP client's positive-integer id stream.
+function RewriteInitId(const Json: string; NewId: Integer): string;
 var
   Root: TJSONValue;
   Obj: TJSONObject;
@@ -572,7 +815,7 @@ begin
     Obj := TJSONObject(Root);
     ExistingPair := Obj.RemovePair('id');
     if ExistingPair <> nil then ExistingPair.Free;
-    Obj.AddPair('id', NewId);
+    Obj.AddPair('id', TJSONNumber.Create(NewId));
     Result := Obj.ToJSON;
   finally
     Root.Free;
@@ -679,7 +922,7 @@ var
   StartupInfo: TStartupInfo;
   ProcInfo: TProcessInformation;
   CmdLine: string;
-  ExePath, LogModes, Cwd: string;
+  ExePath, LogModes, Cwd, ExeSource, SettingsPath: string;
 begin
   Result := False;
   SecAttr.nLength := SizeOf(SecAttr);
@@ -708,11 +951,20 @@ begin
   StartupInfo.hStdOutput := ChildOutWrite;
   StartupInfo.hStdError := GetStdHandle(STD_ERROR_HANDLE);
 
-  ExePath := GetEnv('DELPHI_LSP_EXE', 'DelphiLSP.exe');
+  SettingsPath := '';
+  TMonitor.Enter(GProjectGuard);
+  try
+    if GActiveProject <> nil then SettingsPath := GActiveProject.Path;
+  finally
+    TMonitor.Exit(GProjectGuard);
+  end;
+
+  ExePath := ResolveDelphiLspPath(SettingsPath, GSessionDir, ExeSource);
   LogModes := GetEnv('DELPHI_LSP_LOG_MODES', '0');
   Cwd := GetCurrentDir;
   CmdLine := Format('"%s" -LogModes %s -LSPLogging "%s"', [ExePath, LogModes, Cwd]);
 
+  Diag(Format('Resolved DelphiLSP: %s (source=%s)', [ExePath, ExeSource]));
   Diag('Spawning: ' + CmdLine);
   Diag('Cwd: ' + Cwd);
 
@@ -920,7 +1172,8 @@ end;
 // next forward goes to the new child cleanly.
 procedure TLspSession.RecycleChild;
 var
-  CachedInit, CachedInited, CurrentUri, ReplayId: string;
+  CachedInit, CachedInited, CurrentUri: string;
+  ReplayIdNum: Integer;
   Pair: TPair<string, TOpenDocument>;
   ReplayedDocs: Integer;
 begin
@@ -948,12 +1201,15 @@ begin
 
     // Synthetic ID lets the reader recognize and drop the replayed init's
     // response (the original ID was already consumed by the LSP client).
+    // Distinctive large negative value: very unlikely to collide with the
+    // LSP client's positive-integer id stream, and a number (not a string)
+    // because DelphiLSP doesn't echo string ids — see RewriteInitId comment.
     Inc(FRecycleCounter);
-    ReplayId := Format('delphi-lsp-shim-replay-%d', [FRecycleCounter]);
+    ReplayIdNum := -1000000 - FRecycleCounter;
     if FReader <> nil then
-      FReader.SwallowResponseId(ReplayId);
+      FReader.SwallowResponseId(IntToStr(ReplayIdNum));
 
-    WriteRawLocked(RewriteInitId(CachedInit, ReplayId));
+    WriteRawLocked(RewriteInitId(CachedInit, ReplayIdNum));
     if CachedInited <> '' then
       WriteRawLocked(CachedInited);
 
@@ -978,8 +1234,8 @@ begin
       Inc(ReplayedDocs);
     end;
 
-    Diag(Format('RecycleChild: replay complete (replayId=%s, didOpens=%d)',
-      [ReplayId, ReplayedDocs]));
+    Diag(Format('RecycleChild: replay complete (replayId=%d, didOpens=%d)',
+      [ReplayIdNum, ReplayedDocs]));
   finally
     FChildInLock.Release;
   end;
@@ -1002,8 +1258,6 @@ begin
     Exit;
   end;
 
-  Old := nil;
-  ShouldFire := False;
   NewUri := '';
   TMonitor.Enter(GProjectGuard);
   try
@@ -1108,9 +1362,60 @@ begin
     GSession.RecycleChild;
 end;
 
+// Walk sibling PID dirs under sessions/ and remove any whose PID is not
+// currently running. Crashed/killed shims (e.g. /reload-plugins mid-session)
+// leave dirs behind that would otherwise accumulate.
+procedure GcOrphanSessions(const SessionsRoot: string);
+const
+  // Available since Vista; not in Winapi.Windows on older RTLs.
+  PROCESS_QUERY_LIMITED_INFORMATION = $1000;
+var
+  SR: TSearchRec;
+  Pid: UInt32;
+  H: THandle;
+  ChildDir: string;
+  Removed: Integer;
+  SelfPid: DWORD;
+begin
+  Removed := 0;
+  SelfPid := GetCurrentProcessId;
+  if not DirectoryExists(SessionsRoot) then Exit;
+  if FindFirst(IncludeTrailingPathDelimiter(SessionsRoot) + '*', faDirectory, SR) <> 0 then
+    Exit;
+  try
+    repeat
+      if (SR.Name = '.') or (SR.Name = '..') then Continue;
+      if (SR.Attr and faDirectory) = 0 then Continue;
+      if not TryStrToUInt(SR.Name, Pid) then Continue;
+      if Pid = SelfPid then Continue;
+      H := OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, Pid);
+      if H <> 0 then
+      begin
+        CloseHandle(H);
+        Continue;
+      end;
+      // Process gone; if OpenProcess failed for a different reason we'll
+      // still nuke the dir (a permission denial on someone else's PID is
+      // not realistic since the PID came out of our own data root).
+      ChildDir := IncludeTrailingPathDelimiter(SessionsRoot) + SR.Name;
+      try
+        TDirectory.Delete(ChildDir, True);
+        Inc(Removed);
+      except
+        on E: Exception do
+          Diag(Format('Orphan GC: failed to delete %s: %s', [ChildDir, E.Message]));
+      end;
+    until FindNext(SR) <> 0;
+  finally
+    FindClose(SR);
+  end;
+  if Removed > 0 then
+    Diag(Format('Orphan GC: removed %d stale session dir(s)', [Removed]));
+end;
+
 procedure RegisterSession;
 var
-  Base, WorkspaceFile: string;
+  Base, SessionsRoot, WorkspaceFile: string;
   WS: TStringList;
 begin
   // Prefer CLAUDE_PLUGIN_DATA when Claude Code exports it; fall back to
@@ -1130,7 +1435,9 @@ begin
     Diag('No usable data dir; running without per-session sentinel');
     Exit;
   end;
-  GSessionDir := IncludeTrailingPathDelimiter(Base) + 'sessions' + PathDelim +
+  SessionsRoot := IncludeTrailingPathDelimiter(Base) + 'sessions';
+  GcOrphanSessions(SessionsRoot);
+  GSessionDir := IncludeTrailingPathDelimiter(SessionsRoot) +
                  IntToStr(GetCurrentProcessId);
   GActiveSentinelPath := IncludeTrailingPathDelimiter(GSessionDir) + 'active.txt';
   try
