@@ -29,6 +29,7 @@ program delphi_lsp_shim;
 
 uses
   Winapi.Windows,
+  Winapi.TlHelp32,
   System.SysUtils,
   System.Classes,
   System.IOUtils,
@@ -1647,6 +1648,125 @@ begin
     Diag(Format('  argv[%d]=%s', [I, ParamStr(I)]));
 end;
 
+// Win32 doesn't have a one-call GetParentProcessId. Walk the toolhelp
+// snapshot looking for our own PID and pull its th32ParentProcessID.
+function GetParentProcessId: DWORD;
+var
+  Snapshot: THandle;
+  Entry: TProcessEntry32W;
+  SelfPid: DWORD;
+begin
+  Result := 0;
+  SelfPid := GetCurrentProcessId;
+  Snapshot := CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if Snapshot = INVALID_HANDLE_VALUE then Exit;
+  try
+    FillChar(Entry, SizeOf(Entry), 0);
+    Entry.dwSize := SizeOf(Entry);
+    if Process32FirstW(Snapshot, Entry) then
+    begin
+      repeat
+        if Entry.th32ProcessID = SelfPid then
+        begin
+          Result := Entry.th32ParentProcessID;
+          Exit;
+        end;
+      until not Process32NextW(Snapshot, Entry);
+    end;
+  finally
+    CloseHandle(Snapshot);
+  end;
+end;
+
+procedure DumpProcessIdentity;
+begin
+  Diag(Format('shim pid=%d ppid=%d', [GetCurrentProcessId, GetParentProcessId]));
+end;
+
+// Extract `params.processId` from a JSON-RPC initialize request. Per LSP
+// spec, that's the spawning process's PID — for shims spawned by Claude
+// Code, this should be Claude Code's main PID (or whatever subprocess
+// of Claude Code did the spawn). Returns 0 if the field is missing or
+// not parseable.
+function ExtractInitializeProcessId(const Json: string): DWORD;
+var
+  Root: TJSONValue;
+  Obj, Params: TJSONObject;
+  ParamsVal, MethodVal, PidVal: TJSONValue;
+  PidStr: string;
+  Tmp: Int64;
+begin
+  Result := 0;
+  Root := nil;
+  try
+    try
+      Root := TJSONObject.ParseJSONValue(Json);
+    except
+      Exit;
+    end;
+    if not (Root is TJSONObject) then Exit;
+    Obj := TJSONObject(Root);
+    MethodVal := Obj.GetValue('method');
+    if (MethodVal = nil) or not (MethodVal is TJSONString) or
+       (TJSONString(MethodVal).Value <> 'initialize') then Exit;
+    ParamsVal := Obj.GetValue('params');
+    if not (ParamsVal is TJSONObject) then Exit;
+    Params := TJSONObject(ParamsVal);
+    PidVal := Params.GetValue('processId');
+    if PidVal = nil then Exit;
+    PidStr := PidVal.Value;
+    if PidStr = '' then Exit;
+    if TryStrToInt64(PidStr, Tmp) and (Tmp > 0) and (Tmp <= High(DWORD)) then
+      Result := DWORD(Tmp);
+  finally
+    Root.Free;
+  end;
+end;
+
+// Read a session_id from a SessionStart hook's drop file at
+// <plugin-data>/claude-pid/<key>.json. Returns '' if no file or no
+// session_id field. Try a list of candidate keys (initialize processId,
+// shim PPID) — first hit wins.
+function ReadSessionIdFromHookFile(const Key: string): string;
+var
+  Base, Path, Content: string;
+  Root, IdVal: TJSONValue;
+begin
+  Result := '';
+  Base := ResolvePluginDataBase;
+  if (Base = '') or (Key = '') then Exit;
+  Path := IncludeTrailingPathDelimiter(Base) + 'claude-pid' +
+          PathDelim + Key + '.json';
+  if not FileExists(Path) then Exit;
+  try
+    Content := TFile.ReadAllText(Path, TEncoding.UTF8);
+  except
+    on E: Exception do
+    begin
+      Diag('Hook-file read failed: ' + E.Message);
+      Exit;
+    end;
+  end;
+  Root := nil;
+  try
+    try
+      Root := TJSONObject.ParseJSONValue(Content);
+    except
+      on E: Exception do
+      begin
+        Diag('Hook-file parse failed: ' + E.Message);
+        Exit;
+      end;
+    end;
+    if not (Root is TJSONObject) then Exit;
+    IdVal := TJSONObject(Root).GetValue('session_id');
+    if (IdVal <> nil) and (IdVal is TJSONString) then
+      Result := TJSONString(IdVal).Value;
+  finally
+    Root.Free;
+  end;
+end;
+
 // Last-resort discovery: Claude Code stores per-session conversation logs at
 // ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl. The encoded form
 // replaces ':' and '\' with '-' (so D:\Documents\TestDproj becomes
@@ -1713,6 +1833,7 @@ var
 begin
   DumpClaudeEnv;
   DumpArgv;
+  DumpProcessIdentity;
   GClaudeSessionId := GetEnv('CLAUDE_CODE_SESSION_ID', '');
   // Reject unsubstituted manifest placeholders — Claude Code 2.1.x doesn't
   // expand ${CLAUDE_CODE_SESSION_ID} in lspServers.<n>.env (only the
@@ -1739,17 +1860,30 @@ begin
     end
     else
     begin
-      FromScan := DiscoverSessionIdFromProjectsDir(GetCurrentDir);
+      // Try the SessionStart hook's drop file keyed by our PPID — if Claude
+      // Code spawns LSP servers as direct children, our PPID = Claude Code's
+      // main PID = hook's PPID, so this hits race-free.
+      FromScan := ReadSessionIdFromHookFile(IntToStr(GetParentProcessId));
       if FromScan <> '' then
       begin
         GClaudeSessionId := FromScan;
-        Diag('Claude session id from projects-dir scan: ' + GClaudeSessionId);
+        Diag(Format('Claude session id from hook file (key=ppid=%d): %s',
+          [GetParentProcessId, GClaudeSessionId]));
+      end
+      else
+      begin
+        FromScan := DiscoverSessionIdFromProjectsDir(GetCurrentDir);
+        if FromScan <> '' then
+        begin
+          GClaudeSessionId := FromScan;
+          Diag('Claude session id from projects-dir scan: ' + GClaudeSessionId);
+        end;
       end;
     end;
   end;
   if GClaudeSessionId = '' then
   begin
-    Diag('Claude session id unresolvable (env/argv/scan all failed); cross-session sticky disabled');
+    Diag('Claude session id unresolvable (env/argv/hook/scan all failed); cross-session sticky disabled');
     Exit;
   end;
   Base := ResolvePluginDataBase;
@@ -2146,7 +2280,15 @@ begin
 
     Method := GetMessageMethod(Json);
     if Method = 'initialize' then
+    begin
+      // Diagnostic: log the spawning process PID Claude Code reports via
+      // initialize.processId. Compared against shim's PPID (logged at
+      // startup) to determine if hook-PPID == shim-processId, which lets
+      // us correlate hook output with shim session race-free.
+      Diag(Format('initialize.processId=%d (shim ppid=%d)',
+        [ExtractInitializeProcessId(Json), GetParentProcessId]));
       Json := InjectInitOptions(Json);
+    end;
     // SendToChild atomically tracks (caches init/initialized, applies
     // didOpen/Change/Close to FOpenDocs) and forwards to the child.
     GSession.SendToChild(Json, Method);
