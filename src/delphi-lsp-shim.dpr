@@ -32,6 +32,7 @@ uses
   Winapi.TlHelp32,
   System.SysUtils,
   System.Classes,
+  System.DateUtils,
   System.IOUtils,
   System.JSON,
   System.SyncObjs,
@@ -2709,6 +2710,82 @@ begin
     Diag(Format('WriteFileAtomic MoveFileEx failed: %d', [GetLastError]));
 end;
 
+// Forward decls — DCU-resolution helpers live further down (grouped with
+// other dccOptions parsing), but EmitMultiCandidatePromptWithDcuActivity
+// below needs them.
+function ResolveDcuOutputDir(const DelphilspPath: string): string; forward;
+function CountRecentDcus(const DcuDir: string; const CutoffEarliest: TDateTime): Integer; forward;
+
+// Build the multi-candidate prompt with DCU-activity annotations and emit
+// it to stdout. Each candidate is annotated with how many .dcu files in its
+// build output dir were modified within the last 30 days — a strong signal
+// for "the user is actively building this project". Candidates are sorted
+// by recent-DCU count desc, so the most-likely match appears first (Claude's
+// AskUserQuestion treats option[0] as the recommended choice).
+procedure EmitMultiCandidatePromptWithDcuActivity(Candidates: TList<string>);
+const
+  RecencyDays = 30;
+type
+  TCandidateScore = record
+    Path: string;
+    DcuDir: string;
+    RecentDcus: Integer;
+  end;
+var
+  Scores: array of TCandidateScore;
+  I: Integer;
+  Cutoff: TDateTime;
+  TotalRecent: Integer;
+  Annotation: string;
+begin
+  Cutoff := IncDay(Now, -RecencyDays);
+  SetLength(Scores, Candidates.Count);
+  TotalRecent := 0;
+  for I := 0 to Candidates.Count - 1 do
+  begin
+    Scores[I].Path := Candidates[I];
+    Scores[I].DcuDir := ResolveDcuOutputDir(Candidates[I]);
+    Scores[I].RecentDcus := CountRecentDcus(Scores[I].DcuDir, Cutoff);
+    Inc(TotalRecent, Scores[I].RecentDcus);
+    Diag(Format('Hook: candidate %s dcuDir=%s recentDcus=%d',
+      [ExtractFileName(Candidates[I]), Scores[I].DcuDir, Scores[I].RecentDcus]));
+  end;
+
+  // Sort by RecentDcus desc (stable: ties keep filesystem order).
+  TArray.Sort<TCandidateScore>(Scores, TComparer<TCandidateScore>.Construct(
+    function(const A, B: TCandidateScore): Integer
+    begin
+      Result := B.RecentDcus - A.RecentDcus;
+    end));
+
+  Writeln(Format(
+    'The DelphiLSP plugin found %d .delphilsp.json projects in this workspace and no sticky project pick exists for this session yet. The LSP shim will run syntactic-only until a project is loaded.',
+    [Candidates.Count]));
+  Writeln('');
+  if TotalRecent > 0 then
+    Writeln(Format(
+      'Recent activity (.dcu files modified in the last %d days under each project''s build output dir) is shown alongside each candidate — a strong signal for which project the user has been actively building. The compiler resolves implicit uses-clause references too, so this catches more than just files explicitly listed in the .dproj.',
+      [RecencyDays]))
+  else
+    Writeln(Format(
+      'No project has any .dcu file modified in the last %d days — no recent build activity to use as a hint. List below is unsorted.',
+      [RecencyDays]));
+  Writeln('');
+  Writeln('Use AskUserQuestion to ask the user which project to load, then call /delphi-project <name>. Available projects (sorted by recent build activity desc):');
+  Writeln('');
+
+  for I := 0 to High(Scores) do
+  begin
+    if TotalRecent > 0 then
+      Annotation := Format(' — %d .dcu(s) compiled in last %d days',
+        [Scores[I].RecentDcus, RecencyDays])
+    else
+      Annotation := '';
+    Writeln(Format('  - %s%s',
+      [ExtractFileName(Scores[I].Path), Annotation]));
+  end;
+end;
+
 // Entry point for `--hook-session-start` argv mode. Reads SessionStart hook
 // payload from stdin, persists session-id correlation files, optionally
 // emits a multi-candidate prompt to stdout for Claude.
@@ -2855,14 +2932,11 @@ begin
     Diag(Format('Hook: sticky=no candidates=%d', [Acc.Count]));
     if Acc.Count > 1 then
     begin
-      Writeln(Format(
-        'The DelphiLSP plugin found %d .delphilsp.json projects in this workspace and no sticky project pick exists for this session yet. The LSP shim will run syntactic-only until a project is loaded.',
-        [Acc.Count]));
-      Writeln('');
-      Writeln('Use AskUserQuestion to ask the user which project to load, then call /delphi-project <name>. Available projects:');
-      Writeln('');
-      for I := 0 to Acc.Count - 1 do
-        Writeln('  - ' + ExtractFileName(Acc[I]));
+      // Compute recent-DCU count per candidate. DCU mtimes indicate when a
+      // unit was last compiled into THIS project — catches both explicit
+      // and implicit (uses-clause) ownership. Sort candidates by count desc
+      // so Claude's AskUserQuestion can recommend the most-actively-built one.
+      EmitMultiCandidatePromptWithDcuActivity(Acc);
     end;
   finally
     Acc.Free;
@@ -2956,6 +3030,84 @@ begin
   finally
     Dprojs.Free;
     Owners.Free;
+  end;
+end;
+
+// Extract a value for a `-XX` compiler flag from a dccOptions string.
+// Handles both quoted (`-NU"C:\Some Path"`) and unquoted (`-NU.\Win32\Debug`)
+// forms. Returns '' if not found.
+function ExtractDccFlagValue(const DccOptions, Flag: string): string;
+var
+  Match: TMatch;
+begin
+  Match := TRegEx.Match(DccOptions, Flag + '(?:"([^"]+)"|(\S+))', [roIgnoreCase]);
+  if not Match.Success then Exit('');
+  if (Match.Groups.Count > 1) and Match.Groups[1].Success and
+     (Match.Groups[1].Value <> '') then
+    Result := Match.Groups[1].Value
+  else if (Match.Groups.Count > 2) and Match.Groups[2].Success then
+    Result := Match.Groups[2].Value
+  else
+    Result := '';
+end;
+
+// Resolve a project's DCU output directory from its .delphilsp.json. The IDE
+// puts `-NU<path>` in dccOptions reflecting the currently-selected build
+// target (Debug/Release × Win32/Win64). Path is relative to the .dproj/
+// .delphilsp.json directory. Returns '' if no -NU flag found.
+function ResolveDcuOutputDir(const DelphilspPath: string): string;
+var
+  Content, DccOptions, RelPath: string;
+  Root, SettingsVal, OptsVal: TJSONValue;
+begin
+  Result := '';
+  if not FileExists(DelphilspPath) then Exit;
+  try
+    Content := TFile.ReadAllText(DelphilspPath, TEncoding.UTF8);
+  except
+    Exit;
+  end;
+  Root := nil;
+  try
+    try
+      Root := TJSONObject.ParseJSONValue(Content);
+    except
+      Exit;
+    end;
+    if not (Root is TJSONObject) then Exit;
+    SettingsVal := TJSONObject(Root).GetValue('settings');
+    if not (SettingsVal is TJSONObject) then Exit;
+    OptsVal := TJSONObject(SettingsVal).GetValue('dccOptions');
+    if OptsVal = nil then Exit;
+    DccOptions := OptsVal.Value;
+    RelPath := ExtractDccFlagValue(DccOptions, '-NU');
+    if RelPath = '' then Exit;
+    Result := TPath.GetFullPath(
+      TPath.Combine(ExtractFilePath(DelphilspPath), RelPath));
+  finally
+    Root.Free;
+  end;
+end;
+
+// Count .dcu files under DcuDir whose mtime is >= CutoffEarliest. Each
+// recent .dcu indicates a unit recently compiled into THIS project — catches
+// both explicitly-listed (DCCReference / projectFiles) AND implicitly-used
+// (uses-clause via search paths) units, since the compiler resolved them all.
+function CountRecentDcus(const DcuDir: string; const CutoffEarliest: TDateTime): Integer;
+var
+  SR: TSearchRec;
+begin
+  Result := 0;
+  if (DcuDir = '') or not DirectoryExists(DcuDir) then Exit;
+  if FindFirst(IncludeTrailingPathDelimiter(DcuDir) + '*.dcu', faAnyFile, SR) = 0 then
+  try
+    repeat
+      if (SR.Attr and faDirectory) <> 0 then Continue;
+      if SR.TimeStamp >= CutoffEarliest then
+        Inc(Result);
+    until FindNext(SR) <> 0;
+  finally
+    FindClose(SR);
   end;
 end;
 
