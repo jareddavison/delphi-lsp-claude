@@ -432,6 +432,23 @@ end;
 // keys there on x64 Windows), then the bare HKLM, then HKCU. Returns
 // '' if not found. Result has its trailing path delimiter stripped for
 // consistent concatenation by callers.
+// Pick the DelphiLSP.exe to spawn from a given BDS install root. Prefers
+// `bin64\DelphiLSP.exe` when present (64-bit native, faster + larger address
+// space). Falls back to `bin\DelphiLSP.exe` (32-bit) — that's all SKU's that
+// don't ship the 64-bit toolchain (e.g. older or lower-tier RAD Studio
+// editions). Returns '' if neither exists. Caller decides whether to use it.
+function FindDelphiLspExeUnder(const BdsRoot: string): string;
+var
+  Bin64Path, Bin32Path: string;
+begin
+  Result := '';
+  if BdsRoot = '' then Exit;
+  Bin64Path := IncludeTrailingPathDelimiter(BdsRoot) + 'bin64\DelphiLSP.exe';
+  if FileExists(Bin64Path) then Exit(Bin64Path);
+  Bin32Path := IncludeTrailingPathDelimiter(BdsRoot) + 'bin\DelphiLSP.exe';
+  if FileExists(Bin32Path) then Exit(Bin32Path);
+end;
+
 function FindBdsRootDir(const Version: string): string;
 var
   Reg: TRegistry;
@@ -525,8 +542,8 @@ begin
       if not TRegEx.IsMatch(V, '^\d+\.\d+$') then Continue;
       ThisRoot := FindBdsRootDir(V);
       if ThisRoot = '' then Continue;
-      ExePath := IncludeTrailingPathDelimiter(ThisRoot) + 'bin\DelphiLSP.exe';
-      if not FileExists(ExePath) then Continue;
+      ExePath := FindDelphiLspExeUnder(ThisRoot);
+      if ExePath = '' then Continue;
       if (BestVer = '') or (CompareBdsVersions(V, BestVer) > 0) then
       begin
         BestVer := V;
@@ -613,8 +630,8 @@ begin
         Root := FindBdsRootDir(RuntimeContent);
         if Root <> '' then
         begin
-          Result := IncludeTrailingPathDelimiter(Root) + 'bin\DelphiLSP.exe';
-          if FileExists(Result) then
+          Result := FindDelphiLspExeUnder(Root);
+          if Result <> '' then
           begin
             Source := 'runtime.txt:version=' + RuntimeContent;
             Exit;
@@ -633,8 +650,8 @@ begin
       Root := FindBdsRootDir(VerHint);
       if Root <> '' then
       begin
-        Result := IncludeTrailingPathDelimiter(Root) + 'bin\DelphiLSP.exe';
-        if FileExists(Result) then
+        Result := FindDelphiLspExeUnder(Root);
+        if Result <> '' then
         begin
           Source := Format('hinted by %s (BDS %s)', [ExtractFileName(SettingsPath), VerHint]);
           Exit;
@@ -647,8 +664,8 @@ begin
   HighestVer := FindHighestBdsVersion(Root);
   if (HighestVer <> '') and (Root <> '') then
   begin
-    Result := IncludeTrailingPathDelimiter(Root) + 'bin\DelphiLSP.exe';
-    if FileExists(Result) then
+    Result := FindDelphiLspExeUnder(Root);
+    if Result <> '' then
     begin
       Source := Format('highest installed (BDS %s)', [HighestVer]);
       Exit;

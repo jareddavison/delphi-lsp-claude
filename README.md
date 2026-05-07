@@ -12,7 +12,7 @@ A Claude Code code-intelligence plugin that wires Embarcadero's DelphiLSP into C
 
 ## Requirements
 
-- **Windows** with **RAD Studio 11+** installed. The shim auto-detects the highest installed version via the registry; override via `DELPHI_LSP_EXE` (absolute path) or `/delphi-runtime` (slash command).
+- **Windows** with **RAD Studio 11+** installed. The shim auto-detects the highest installed version via the registry, prefers the 64-bit DelphiLSP (`<install>\bin64\DelphiLSP.exe`) when present, and falls back to the 32-bit one (`<install>\bin\DelphiLSP.exe`). The 64-bit binary ships with higher-tier SKUs; lower tiers get the 32-bit one only — both work. Override via `DELPHI_LSP_EXE` (absolute path) or `/delphi-runtime` (slash command).
 - A valid Delphi license (DelphiLSP refuses to start without one).
 
 ## Install
@@ -28,9 +28,11 @@ claude --plugin-dir ./delphi-lsp-claude
 
 ## Per-project `.delphilsp.json`
 
-DelphiLSP needs a `.delphilsp.json` settings file per project (search paths, conditional defines, platform/config target). RAD Studio writes one whenever you build a `.dproj` in the IDE. Without it, the server runs syntactic-only — no semantic queries, no diagnostics.
+DelphiLSP needs a `.delphilsp.json` settings file per project (search paths, conditional defines, platform/config target). Without it, the server runs syntactic-only — no semantic queries, no diagnostics.
 
-To produce one for a project: open the `.dproj` in RAD Studio once. The IDE writes `<ProjectName>.delphilsp.json` next to the `.dproj`. The file lives in the workspace, gets committed (or not, your call), and is picked up by this plugin automatically.
+**The IDE feature must be turned on first.** Per Embarcadero's docs ([Code Insight Reference: Creating .delphilsp.json Files](https://docwiki.embarcadero.com/RADStudio/Florence/en/Code_Insight_Reference#Creating_.delphilsp.json_Files)), enable `Tools → Options → User Interface → Editor → Language → Language Server Protocol → Save .delphilsp.json file when project is saved`. Then save the `.dproj` and the IDE writes `<ProjectName>.delphilsp.json` next to it.
+
+The file lives in the workspace, gets committed (or not, your call), and is picked up by this plugin automatically.
 
 When you switch the IDE's active config or platform (Debug/Release, Win32/Win64, etc.), RAD Studio rewrites `.delphilsp.json`. The shim watches for that and re-fires `didChangeConfiguration` automatically — so semantic queries reflect the IDE's current target.
 
