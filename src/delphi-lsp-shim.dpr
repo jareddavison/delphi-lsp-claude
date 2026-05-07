@@ -1353,6 +1353,31 @@ begin
   end;
 end;
 
+// /delphi-shim-reload writes a sentinel at <session>/shim-reload.flag. Unlike
+// /delphi-reload (which only recycles the DelphiLSP child while keeping the
+// shim alive), this exits the entire shim process. Claude Code's LSP
+// integration is lazy — the next LSP query after exit spawns a fresh shim
+// with whatever binary is on disk now. Useful during dev after a rebuild.
+procedure ReadAndApplyShimReloadFlag;
+var
+  FlagPath: string;
+begin
+  if GSessionDir = '' then Exit;
+  FlagPath := IncludeTrailingPathDelimiter(GSessionDir) + 'shim-reload.flag';
+  if not FileExists(FlagPath) then Exit;
+  Diag('Shim-reload flag detected — exiting for fresh spawn');
+  try
+    DeleteFile(FlagPath);
+  except
+    on E: Exception do Diag('Shim-reload flag delete failed: ' + E.Message);
+  end;
+  // Halt skips main-thread destructors but nothing critical needs flushing —
+  // diag log writes are flushed per Writeln (Append + CloseFile pattern in
+  // Diag), and the per-PID session dir gets GC'd by the next shim's
+  // GcOrphanSessions sweep. The OS reclaims pipe handles.
+  Halt(0);
+end;
+
 // /delphi-reload writes a sentinel file at <session>/reload.flag. The watcher
 // notices, this function is called, the flag is consumed (deleted), and the
 // session recycles its DelphiLSP child.
@@ -2313,6 +2338,7 @@ begin
         try
           ReadAndApplySentinel;
           ReadAndApplyReloadFlag;
+          ReadAndApplyShimReloadFlag;
         except
           on E: Exception do Diag('Sentinel callback error: ' + E.Message);
         end;
