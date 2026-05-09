@@ -21,11 +21,13 @@ uses
   DelphiLsp.Logging in '..\src\units\DelphiLsp.Logging.pas',
   DelphiLsp.LspMessage in '..\src\units\DelphiLsp.LspMessage.pas',
   DelphiLsp.ProcessTree in '..\src\units\DelphiLsp.ProcessTree.pas',
+  DelphiLsp.DprojParse in '..\src\units\DelphiLsp.DprojParse.pas',
   DelphiLsp.XmlDecodeTests in 'DelphiLsp.XmlDecodeTests.pas',
   DelphiLsp.PathsTests in 'DelphiLsp.PathsTests.pas',
   DelphiLsp.WalkersTests in 'DelphiLsp.WalkersTests.pas',
   DelphiLsp.LspMessageTests in 'DelphiLsp.LspMessageTests.pas',
-  DelphiLsp.ProcessTreeTests in 'DelphiLsp.ProcessTreeTests.pas';
+  DelphiLsp.ProcessTreeTests in 'DelphiLsp.ProcessTreeTests.pas',
+  DelphiLsp.DprojParseTests in 'DelphiLsp.DprojParseTests.pas';
 
 var
   Runner: ITestRunner;

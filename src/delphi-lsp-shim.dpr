@@ -46,7 +46,8 @@ uses
   DelphiLsp.Walkers,
   DelphiLsp.Logging,
   DelphiLsp.LspMessage,
-  DelphiLsp.ProcessTree;
+  DelphiLsp.ProcessTree,
+  DelphiLsp.DprojParse;
 
 type
   TLspStream = class
@@ -2267,8 +2268,6 @@ end;
 // Forward decls — DCU-resolution helpers live further down (grouped with
 // other dccOptions parsing), but EmitMultiCandidatePromptWithDcuActivity
 // below needs them.
-function ResolveDcuOutputDir(const DelphilspPath: string): string; forward;
-function CountRecentDcus(const DcuDir: string; const CutoffEarliest: TDateTime): Integer; forward;
 
 // Build the multi-candidate prompt with DCU-activity annotations and emit
 // it to stdout. Each candidate is annotated with how many .dcu files in its
@@ -2498,148 +2497,6 @@ begin
 end;
 
 
-// For a given .pas (or .inc/.dpr/.dpk) absolute path, scan workspace .dproj
-// files for `<DCCReference Include="<rel-path>"/>` entries and return the
-// `.delphilsp.json` paths of any project that references it. Path comparison
-// is case-insensitive after slash normalization. Returns 0/1/N owners —
-// caller decides whether 1 is unique-enough to act on.
-function FindOwningDelphilspJsons(const PasPath: string): TArray<string>;
-var
-  Dprojs: TList<string>;
-  Owners: TList<string>;
-  DprojPath, DprojDir, Content, RefPath, AbsRef, DelphilspPath: string;
-  Matches: TMatchCollection;
-  M: TMatch;
-  TargetCanon, RefCanon: string;
-  I: Integer;
-begin
-  Dprojs := TList<string>.Create;
-  Owners := TList<string>.Create;
-  try
-    CollectFilesByExt(GetCurrentDir, '.dproj', 0, Dprojs);
-    TargetCanon := LowerCase(StringReplace(PasPath, '\', '/', [rfReplaceAll]));
-    for I := 0 to Dprojs.Count - 1 do
-    begin
-      DprojPath := Dprojs[I];
-      DprojDir := ExtractFilePath(DprojPath);
-      try
-        Content := TFile.ReadAllText(DprojPath, TEncoding.UTF8);
-      except
-        on E: Exception do
-        begin
-          Diag(Format('FindOwning: read failed for %s: %s', [DprojPath, E.Message]));
-          Continue;
-        end;
-      end;
-      Matches := TRegEx.Matches(Content, '<DCCReference\s+Include="([^"]+)"', [roIgnoreCase]);
-      for M in Matches do
-      begin
-        if M.Groups.Count < 2 then Continue;
-        // XML-decode the Include value: third-party .dproj generators may
-        // emit &amp; / &lt; etc. for paths the IDE would write verbatim.
-        RefPath := XmlDecode(M.Groups[1].Value);
-        AbsRef := TPath.GetFullPath(TPath.Combine(DprojDir, RefPath));
-        RefCanon := LowerCase(StringReplace(AbsRef, '\', '/', [rfReplaceAll]));
-        if RefCanon = TargetCanon then
-        begin
-          DelphilspPath := ChangeFileExt(DprojPath, '.delphilsp.json');
-          if FileExists(DelphilspPath) and (Owners.IndexOf(DelphilspPath) < 0) then
-            Owners.Add(DelphilspPath);
-          Break; // one match per .dproj is enough
-        end;
-      end;
-    end;
-    Result := Owners.ToArray;
-  finally
-    Dprojs.Free;
-    Owners.Free;
-  end;
-end;
-
-// Extract a value for a `-XX` compiler flag from a dccOptions string.
-// Handles both quoted (`-NU"C:\Some Path"`) and unquoted (`-NU.\Win32\Debug`)
-// forms. Returns '' if not found.
-//
-// The flag must be at the start of dccOptions or preceded by whitespace —
-// prevents accidentally matching `-FOOBAR-NU/path` substrings inside other
-// args. Quoted values can contain spaces; unquoted values run to the next
-// whitespace.
-function ExtractDccFlagValue(const DccOptions, Flag: string): string;
-var
-  Match: TMatch;
-begin
-  Match := TRegEx.Match(DccOptions,
-    '(?:^|\s)' + Flag + '(?:"([^"]+)"|(\S+))', [roIgnoreCase]);
-  if not Match.Success then Exit('');
-  if (Match.Groups.Count > 1) and Match.Groups[1].Success and
-     (Match.Groups[1].Value <> '') then
-    Result := Match.Groups[1].Value
-  else if (Match.Groups.Count > 2) and Match.Groups[2].Success then
-    Result := Match.Groups[2].Value
-  else
-    Result := '';
-end;
-
-// Resolve a project's DCU output directory from its .delphilsp.json. The IDE
-// puts `-NU<path>` in dccOptions reflecting the currently-selected build
-// target (Debug/Release × Win32/Win64). Path is relative to the .dproj/
-// .delphilsp.json directory. Returns '' if no -NU flag found.
-function ResolveDcuOutputDir(const DelphilspPath: string): string;
-var
-  Content, DccOptions, RelPath: string;
-  Root, SettingsVal, OptsVal: TJSONValue;
-begin
-  Result := '';
-  if not FileExists(DelphilspPath) then Exit;
-  try
-    Content := TFile.ReadAllText(DelphilspPath, TEncoding.UTF8);
-  except
-    Exit;
-  end;
-  Root := nil;
-  try
-    try
-      Root := TJSONObject.ParseJSONValue(Content);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    SettingsVal := TJSONObject(Root).GetValue('settings');
-    if not (SettingsVal is TJSONObject) then Exit;
-    OptsVal := TJSONObject(SettingsVal).GetValue('dccOptions');
-    if OptsVal = nil then Exit;
-    DccOptions := OptsVal.Value;
-    RelPath := ExtractDccFlagValue(DccOptions, '-NU');
-    if RelPath = '' then Exit;
-    Result := TPath.GetFullPath(
-      TPath.Combine(ExtractFilePath(DelphilspPath), RelPath));
-  finally
-    Root.Free;
-  end;
-end;
-
-// Count .dcu files under DcuDir whose mtime is >= CutoffEarliest. Each
-// recent .dcu indicates a unit recently compiled into THIS project — catches
-// both explicitly-listed (DCCReference / projectFiles) AND implicitly-used
-// (uses-clause via search paths) units, since the compiler resolved them all.
-function CountRecentDcus(const DcuDir: string; const CutoffEarliest: TDateTime): Integer;
-var
-  SR: TSearchRec;
-begin
-  Result := 0;
-  if (DcuDir = '') or not DirectoryExists(DcuDir) then Exit;
-  if FindFirst(IncludeTrailingPathDelimiter(DcuDir) + '*.dcu', faAnyFile, SR) = 0 then
-  try
-    repeat
-      if (SR.Attr and faDirectory) <> 0 then Continue;
-      if SR.TimeStamp >= CutoffEarliest then
-        Inc(Result);
-    until FindNext(SR) <> 0;
-  finally
-    FindClose(SR);
-  end;
-end;
-
 // `--find-project-for <abspath>` argv mode. Prints the unique owning
 // .delphilsp.json on stdout (exit 0), or lists multi/none on stderr
 // (exit 1). Building block for hook-time picker enrichment, future
@@ -2661,7 +2518,7 @@ begin
   Query := TPath.GetFullPath(Query);
   Diag(Format('FindProjectFor: query=%s cwd=%s', [Query, GetCurrentDir]));
 
-  Owners := FindOwningDelphilspJsons(Query);
+  Owners := FindOwningDelphilspJsons(GetCurrentDir, Query);
   Diag(Format('FindProjectFor: %d match(es)', [Length(Owners)]));
 
   if Length(Owners) = 1 then
