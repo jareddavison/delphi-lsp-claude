@@ -53,7 +53,8 @@ uses
   DelphiLsp.DelphiInstall,
   DelphiLsp.Gc,
   DelphiLsp.LspWire,
-  DelphiLsp.LspPathResolver;
+  DelphiLsp.LspPathResolver,
+  DelphiLsp.Diagnostics;
 
 type
   TChildReaderThread = class(TThread)
@@ -713,58 +714,6 @@ begin
   end;
   if GSession <> nil then
     GSession.RecycleChild;
-end;
-
-
-
-
-// Resolve the sticky-bindings file path from CLAUDE_CODE_SESSION_ID + plugin-data
-// base. Called once at startup before InitSettings so InitSettings can consult
-// sticky as part of its resolution chain.
-// Dump every env var whose name starts with CLAUDE — diagnostic for figuring
-// out which ones Claude Code propagates to LSP subprocesses (vs to Bash, where
-// CLAUDE_CODE_SESSION_ID is visible). Remove once propagation is understood.
-procedure DumpClaudeEnv;
-var
-  Block, P: PWideChar;
-  EntryStr: string;
-  EqIdx: Integer;
-begin
-  Block := GetEnvironmentStringsW;
-  if Block = nil then Exit;
-  try
-    P := Block;
-    while P^ <> #0 do
-    begin
-      EntryStr := P;
-      if (Length(EntryStr) >= 7) and SameText(Copy(EntryStr, 1, 7), 'CLAUDE_') then
-      begin
-        EqIdx := Pos('=', EntryStr);
-        if EqIdx > 0 then
-          Diag('env: ' + Copy(EntryStr, 1, EqIdx - 1) + '=' + Copy(EntryStr, EqIdx + 1, MaxInt))
-        else
-          Diag('env: ' + EntryStr);
-      end;
-      Inc(P, Length(EntryStr) + 1);
-    end;
-  finally
-    FreeEnvironmentStringsW(Block);
-  end;
-end;
-
-
-procedure DumpArgv;
-var
-  I: Integer;
-begin
-  Diag(Format('argv: %d arg(s)', [ParamCount]));
-  for I := 0 to ParamCount do
-    Diag(Format('  argv[%d]=%s', [I, ParamStr(I)]));
-end;
-
-procedure DumpProcessIdentity;
-begin
-  Diag(Format('shim pid=%d ppid=%d', [GetCurrentProcessId, GetParentProcessId]));
 end;
 
 
