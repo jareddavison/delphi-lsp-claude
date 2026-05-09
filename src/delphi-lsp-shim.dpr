@@ -48,7 +48,8 @@ uses
   DelphiLsp.LspMessage,
   DelphiLsp.ProcessTree,
   DelphiLsp.DprojParse,
-  DelphiLsp.StickyState;
+  DelphiLsp.StickyState,
+  DelphiLsp.PluginData;
 
 type
   TLspStream = class
@@ -1183,19 +1184,6 @@ begin
     Diag(Format('Orphan GC: removed %d stale session dir(s)', [Removed]));
 end;
 
-// Plugin-data base used by both the per-PID sessions/ tree (sentinel files) and
-// the per-claude-session-id session-state/ tree (sticky bindings). Slash commands
-// resolve this with the same fallback chain so both sides agree.
-function ResolvePluginDataBase: string;
-begin
-  Result := GetEnv('CLAUDE_PLUGIN_DATA', '');
-  if Result = '' then
-  begin
-    Result := GetEnv('LOCALAPPDATA', '');
-    if Result <> '' then
-      Result := IncludeTrailingPathDelimiter(Result) + 'delphi-lsp-claude';
-  end;
-end;
 
 
 // Resolve the sticky-bindings file path from CLAUDE_CODE_SESSION_ID + plugin-data
@@ -1413,7 +1401,6 @@ end;
 // / CLAUDE_PLUGIN_DATA). Verified 2026-05-07. If that changes, env/argv paths
 // take precedence and this function never runs. Coupled to Claude Code's
 // internal storage layout — re-verify if it stops working.
-function ResolveProjectsRoot: string; forward;
 
 function DiscoverSessionIdFromProjectsDir(const Cwd: string): string;
 const
@@ -1461,74 +1448,13 @@ begin
     Diag('Projects-dir scan: no .jsonl in ' + ProjectDir);
 end;
 
-// Locate Claude Code's <data-dir>/projects/. Two strategies:
-//   1. Derive from CLAUDE_PLUGIN_DATA. Per docs, that env var resolves to
-//      <data-dir>/plugins/data/<plugin-id>/, so walking up 3 levels gives
-//      <data-dir>. Authoritative regardless of where Claude Code was
-//      configured to store data — works even if the user has a non-standard
-//      install (CLAUDE_HOME-equivalent override, symlinked layout, etc.).
-//   2. Fall back to $USERPROFILE/.claude/projects (the documented default
-//      location) if CLAUDE_PLUGIN_DATA isn't set or doesn't resolve.
-// Empirically CLAUDE_PLUGIN_DATA IS in the LSP subprocess env on Claude
-// Code 2.1.x, so strategy 1 fires for normal installs.
-function ResolveProjectsRoot: string;
-var
-  PluginData, DataDir: string;
-begin
-  Result := '';
-  PluginData := GetEnv('CLAUDE_PLUGIN_DATA', '');
-  if PluginData <> '' then
-  begin
-    DataDir := ExtractFileDir(ExtractFileDir(ExtractFileDir(
-      ExcludeTrailingPathDelimiter(PluginData))));
-    if (DataDir <> '') and DirectoryExists(DataDir) then
-    begin
-      Result := IncludeTrailingPathDelimiter(DataDir) + 'projects';
-      if DirectoryExists(Result) then Exit;
-    end;
-  end;
-  Result := IncludeTrailingPathDelimiter(GetEnv('USERPROFILE', '')) +
-            '.claude' + PathDelim + 'projects';
-end;
-
-// Test whether a Claude Code session is still resumable by looking for its
-// transcript .jsonl in <data-dir>/projects/<encoded-cwd>/<session-id>.jsonl.
-// Claude Code keeps the .jsonl as long as the session is in conversation
-// history; once the session is fully removed, the file is gone. Used by GC
-// to decide which session-state and by-id files to delete.
-function IsClaudeSessionAlive(const SessionId: string): Boolean;
-var
-  ProjectsRoot, ProjDir, JsonlPath: string;
-  SR: TSearchRec;
-begin
-  Result := False;
-  if SessionId = '' then Exit;
-  ProjectsRoot := ResolveProjectsRoot;
-  if not DirectoryExists(ProjectsRoot) then Exit;
-  if FindFirst(IncludeTrailingPathDelimiter(ProjectsRoot) + '*', faDirectory, SR) = 0 then
-  try
-    repeat
-      if (SR.Name = '.') or (SR.Name = '..') then Continue;
-      if (SR.Attr and faDirectory) = 0 then Continue;
-      ProjDir := IncludeTrailingPathDelimiter(ProjectsRoot) + SR.Name;
-      JsonlPath := IncludeTrailingPathDelimiter(ProjDir) + SessionId + '.jsonl';
-      if FileExists(JsonlPath) then
-      begin
-        Result := True;
-        Exit;
-      end;
-    until FindNext(SR) <> 0;
-  finally
-    FindClose(SR);
-  end;
-end;
 
 // Sweep <plugin-data>/session-state/<id>.json for sessions whose .jsonl is
 // gone. Conservative — keeps anything that might still be resumable. Skips
 // the current session's bindings (never GC ourselves).
 procedure GcStaleSessionState;
 var
-  Base, Dir, FullPath, SessionId: string;
+  Base, Dir, FullPath, SessionId, ProjectsRoot: string;
   SR: TSearchRec;
   Removed: Integer;
 begin
@@ -1536,6 +1462,7 @@ begin
   if Base = '' then Exit;
   Dir := IncludeTrailingPathDelimiter(Base) + 'session-state';
   if not DirectoryExists(Dir) then Exit;
+  ProjectsRoot := ResolveProjectsRoot;
   Removed := 0;
   if FindFirst(IncludeTrailingPathDelimiter(Dir) + '*.json', faAnyFile, SR) = 0 then
   try
@@ -1543,7 +1470,7 @@ begin
       if (SR.Attr and faDirectory) <> 0 then Continue;
       SessionId := ChangeFileExt(SR.Name, '');
       if SameText(SessionId, GClaudeSessionId) then Continue;
-      if IsClaudeSessionAlive(SessionId) then Continue;
+      if IsClaudeSessionAlive(ProjectsRoot, SessionId) then Continue;
       FullPath := IncludeTrailingPathDelimiter(Dir) + SR.Name;
       if DeleteFile(PChar(FullPath)) then
         Inc(Removed)
@@ -1567,7 +1494,7 @@ const
   ByIdPrefix = 'by-id-';
   PROCESS_QUERY_LIMITED_INFORMATION = $1000;
 var
-  Base, Dir, FullPath, BaseName, SessionId: string;
+  Base, Dir, FullPath, BaseName, SessionId, ProjectsRoot: string;
   SR: TSearchRec;
   Pid: UInt32;
   H: THandle;
@@ -1577,6 +1504,7 @@ begin
   if Base = '' then Exit;
   Dir := IncludeTrailingPathDelimiter(Base) + 'claude-pid';
   if not DirectoryExists(Dir) then Exit;
+  ProjectsRoot := ResolveProjectsRoot;
   Removed := 0;
   if FindFirst(IncludeTrailingPathDelimiter(Dir) + '*.json', faAnyFile, SR) = 0 then
   try
@@ -1588,7 +1516,7 @@ begin
          SameText(Copy(BaseName, 1, Length(ByIdPrefix)), ByIdPrefix) then
       begin
         SessionId := Copy(BaseName, Length(ByIdPrefix) + 1, MaxInt);
-        if IsClaudeSessionAlive(SessionId) then Continue;
+        if IsClaudeSessionAlive(ProjectsRoot, SessionId) then Continue;
         if DeleteFile(PChar(FullPath)) then
           Inc(Removed)
         else
@@ -2706,7 +2634,7 @@ begin
     // every other session's sticky en masse on a false-negative liveness
     // signal. Same risk applies to claude-pid by-id files (also use
     // IsClaudeSessionAlive), so guard both together.
-    if (GClaudeSessionId <> '') and IsClaudeSessionAlive(GClaudeSessionId) then
+    if (GClaudeSessionId <> '') and IsClaudeSessionAlive(ResolveProjectsRoot, GClaudeSessionId) then
     begin
       GcStaleSessionState;
       GcStaleClaudePidFiles;
