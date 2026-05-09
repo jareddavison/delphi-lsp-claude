@@ -47,7 +47,8 @@ uses
   DelphiLsp.Logging,
   DelphiLsp.LspMessage,
   DelphiLsp.ProcessTree,
-  DelphiLsp.DprojParse;
+  DelphiLsp.DprojParse,
+  DelphiLsp.StickyState;
 
 type
   TLspStream = class
@@ -977,7 +978,6 @@ end;
 
 // Forward decls — sticky-pick helpers live further down (grouped with other
 // plugin-data resolution), but SwitchToProject below needs to call them.
-procedure WriteStickyForCwd(const Cwd, SettingsPath: string); forward;
 
 // Replace the active project. Frees the old TActiveProject (which stops
 // its watcher) and constructs a new one with its own watcher and seeded
@@ -1019,7 +1019,7 @@ begin
   // Persist as sticky so a restart of this same Claude session lands here
   // without prompting. Must come AFTER the in-memory swap so a partial sticky
   // write doesn't outlive a failed switch.
-  WriteStickyForCwd(GetCurrentDir, NewPath);
+  WriteStickyForCwd(GSessionStatePath, GetCurrentDir, NewPath);
   if ShouldFire then
   begin
     GSession.WriteToChild(MakeDidChangeConfigJson(NewUri));
@@ -1197,136 +1197,6 @@ begin
   end;
 end;
 
-// Read the sticky pick for the current cwd from the per-claude-session-id
-// bindings file. Returns the absolute .delphilsp.json path if a valid entry
-// exists AND the file still exists on disk; '' otherwise. Survives shim death
-// because it lives outside the per-PID sessions/ tree.
-function ReadStickyForCwd(const Cwd: string): string;
-var
-  Content, CwdHash, Path: string;
-  Root, EntryVal, PathVal: TJSONValue;
-  Entry: TJSONObject;
-begin
-  Result := '';
-  if (GSessionStatePath = '') or (not FileExists(GSessionStatePath)) then Exit;
-  try
-    Content := TFile.ReadAllText(GSessionStatePath, TEncoding.UTF8);
-  except
-    on E: Exception do
-    begin
-      Diag('Sticky read failed: ' + E.Message);
-      Exit;
-    end;
-  end;
-  CwdHash := THashSHA2.GetHashString(NormalizeCwd(Cwd), SHA256);
-  Root := nil;
-  try
-    try
-      Root := TJSONObject.ParseJSONValue(Content);
-    except
-      on E: Exception do
-      begin
-        Diag('Sticky parse failed: ' + E.Message);
-        Exit;
-      end;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    EntryVal := TJSONObject(Root).GetValue(CwdHash);
-    if not (EntryVal is TJSONObject) then Exit;
-    Entry := TJSONObject(EntryVal);
-    PathVal := Entry.GetValue('settingsFile');
-    if (PathVal = nil) then Exit;
-    Path := PathVal.Value;
-    if (Path <> '') and FileExists(Path) then
-      Result := Path
-    else if Path <> '' then
-      Diag('Sticky pick references missing file (ignored): ' + Path);
-  finally
-    Root.Free;
-  end;
-end;
-
-// Persist a sticky pick for (current claude session, given cwd). Atomically
-// updates the bindings file via tmp+MoveFileEx so a concurrent reader never
-// sees a half-written file. No-op if session id wasn't available (shim wasn't
-// spawned by Claude Code, or the env var wasn't propagated).
-procedure WriteStickyForCwd(const Cwd, SettingsPath: string);
-var
-  Root: TJSONObject;
-  ExistingVal: TJSONValue;
-  ExistingPair: TJSONPair;
-  Entry: TJSONObject;
-  CwdHash, Content, Dir, TmpPath, Json: string;
-  Bytes: TBytes;
-  FS: TFileStream;
-begin
-  if (GSessionStatePath = '') or (Cwd = '') or (SettingsPath = '') then Exit;
-  CwdHash := THashSHA2.GetHashString(NormalizeCwd(Cwd), SHA256);
-
-  Root := nil;
-  try
-    if FileExists(GSessionStatePath) then
-    begin
-      try
-        Content := TFile.ReadAllText(GSessionStatePath, TEncoding.UTF8);
-        ExistingVal := TJSONObject.ParseJSONValue(Content);
-        if ExistingVal is TJSONObject then
-          Root := TJSONObject(ExistingVal)
-        else if ExistingVal <> nil then
-          ExistingVal.Free;
-      except
-        on E: Exception do
-          Diag('Sticky read-for-update failed: ' + E.Message);
-      end;
-    end;
-    if Root = nil then Root := TJSONObject.Create;
-
-    ExistingPair := Root.RemovePair(CwdHash);
-    if ExistingPair <> nil then ExistingPair.Free;
-    Entry := TJSONObject.Create;
-    Entry.AddPair('settingsFile', SettingsPath);
-    Entry.AddPair('cwd', Cwd);
-    Entry.AddPair('lastUsed', FormatDateTime('yyyy-mm-dd"T"hh:nn:ss"Z"', Now));
-    Root.AddPair(CwdHash, Entry);
-
-    Dir := ExtractFilePath(GSessionStatePath);
-    try
-      ForceDirectories(Dir);
-    except
-      on E: Exception do
-      begin
-        Diag('Sticky dir create failed: ' + E.Message);
-        Exit;
-      end;
-    end;
-
-    Json := Root.ToJSON;
-    TmpPath := GSessionStatePath + '.tmp';
-    try
-      Bytes := TEncoding.UTF8.GetBytes(Json);
-      FS := TFileStream.Create(TmpPath, fmCreate);
-      try
-        if Length(Bytes) > 0 then
-          FS.WriteBuffer(Bytes[0], Length(Bytes));
-      finally
-        FS.Free;
-      end;
-    except
-      on E: Exception do
-      begin
-        Diag('Sticky tmp write failed: ' + E.Message);
-        Exit;
-      end;
-    end;
-    if not MoveFileEx(PChar(TmpPath), PChar(GSessionStatePath),
-                      MOVEFILE_REPLACE_EXISTING) then
-      Diag(Format('Sticky MoveFileEx failed: %d', [GetLastError]))
-    else
-      Diag(Format('Sticky pick saved: cwd=%s settings=%s', [Cwd, SettingsPath]));
-  finally
-    Root.Free;
-  end;
-end;
 
 // Resolve the sticky-bindings file path from CLAUDE_CODE_SESSION_ID + plugin-data
 // base. Called once at startup before InitSettings so InitSettings can consult
@@ -2734,7 +2604,7 @@ begin
     Exit;
   end;
 
-  Sticky := ReadStickyForCwd(GetCurrentDir);
+  Sticky := ReadStickyForCwd(GSessionStatePath, GetCurrentDir);
   if Sticky <> '' then
   begin
     GActiveProject := TActiveProject.Create(Sticky);
@@ -2757,7 +2627,7 @@ begin
       GActiveProject := TActiveProject.Create(Acc[0]);
       GActiveProject.StartWatcher;
       Diag('Initial settings URI (single candidate): ' + GActiveProject.Uri);
-      WriteStickyForCwd(GetCurrentDir, Acc[0]);
+      WriteStickyForCwd(GSessionStatePath, GetCurrentDir, Acc[0]);
       Exit;
     end;
     Diag(Format('Multiple .delphilsp.json candidates (%d); shim starts without project — user must run /delphi-project', [Acc.Count]));
