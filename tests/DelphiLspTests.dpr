@@ -20,10 +20,12 @@ uses
   DelphiLsp.Walkers in '..\src\units\DelphiLsp.Walkers.pas',
   DelphiLsp.Logging in '..\src\units\DelphiLsp.Logging.pas',
   DelphiLsp.LspMessage in '..\src\units\DelphiLsp.LspMessage.pas',
+  DelphiLsp.ProcessTree in '..\src\units\DelphiLsp.ProcessTree.pas',
   DelphiLsp.XmlDecodeTests in 'DelphiLsp.XmlDecodeTests.pas',
   DelphiLsp.PathsTests in 'DelphiLsp.PathsTests.pas',
   DelphiLsp.WalkersTests in 'DelphiLsp.WalkersTests.pas',
-  DelphiLsp.LspMessageTests in 'DelphiLsp.LspMessageTests.pas';
+  DelphiLsp.LspMessageTests in 'DelphiLsp.LspMessageTests.pas',
+  DelphiLsp.ProcessTreeTests in 'DelphiLsp.ProcessTreeTests.pas';
 
 var
   Runner: ITestRunner;

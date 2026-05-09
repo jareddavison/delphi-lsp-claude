@@ -45,7 +45,8 @@ uses
   DelphiLsp.Paths,
   DelphiLsp.Walkers,
   DelphiLsp.Logging,
-  DelphiLsp.LspMessage;
+  DelphiLsp.LspMessage,
+  DelphiLsp.ProcessTree;
 
 type
   TLspStream = class
@@ -1395,73 +1396,6 @@ begin
   Diag(Format('argv: %d arg(s)', [ParamCount]));
   for I := 0 to ParamCount do
     Diag(Format('  argv[%d]=%s', [I, ParamStr(I)]));
-end;
-
-// Win32 doesn't have a one-call GetParentProcessId. Walk the toolhelp
-// snapshot looking for the given PID and pull its th32ParentProcessID.
-function GetParentOfPid(Pid: DWORD): DWORD;
-var
-  Snapshot: THandle;
-  Entry: TProcessEntry32W;
-begin
-  Result := 0;
-  Snapshot := CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  if Snapshot = INVALID_HANDLE_VALUE then Exit;
-  try
-    FillChar(Entry, SizeOf(Entry), 0);
-    Entry.dwSize := SizeOf(Entry);
-    if Process32FirstW(Snapshot, Entry) then
-    begin
-      repeat
-        if Entry.th32ProcessID = Pid then
-        begin
-          Result := Entry.th32ParentProcessID;
-          Exit;
-        end;
-      until not Process32NextW(Snapshot, Entry);
-    end;
-  finally
-    CloseHandle(Snapshot);
-  end;
-end;
-
-function GetParentProcessId: DWORD;
-begin
-  Result := GetParentOfPid(GetCurrentProcessId);
-end;
-
-// Collect process ancestors by walking up via th32ParentProcessID. Used to
-// correlate hook and shim across Claude Code's process tree: both descend
-// from Claude Code's main process, but possibly through different
-// intermediate subprocesses (hooks-runner vs LSP-runner). The hook records
-// drop files keyed by EVERY ancestor PID; the shim walks its OWN ancestry
-// looking for a match. They intersect at Claude Code's main PID (or higher),
-// giving a race-free per-Claude-Code-instance correlation key.
-//
-// Bounded at 20 levels deep + cycle detection in case of weirdness; in
-// practice Claude Code's process tree is 3-5 levels.
-function GetAncestorPids(StartPid: DWORD): TArray<DWORD>;
-const
-  MaxDepth = 20;
-  SystemPid = 4;     // Windows System process (PID 4); not a useful ancestor
-var
-  Acc: TList<DWORD>;
-  Current: DWORD;
-begin
-  Acc := TList<DWORD>.Create;
-  try
-    Current := StartPid;
-    while (Current > SystemPid) and (Acc.Count < MaxDepth) do
-    begin
-      if Acc.IndexOf(Current) >= 0 then Break; // cycle guard
-      Acc.Add(Current);
-      Current := GetParentOfPid(Current);
-      if Current = 0 then Break;
-    end;
-    Result := Acc.ToArray;
-  finally
-    Acc.Free;
-  end;
 end;
 
 procedure DumpProcessIdentity;
