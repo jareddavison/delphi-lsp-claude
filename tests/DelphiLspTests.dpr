@@ -28,6 +28,7 @@ uses
   DelphiLsp.IO in '..\src\units\DelphiLsp.IO.pas',
   DelphiLsp.DelphiInstall in '..\src\units\DelphiLsp.DelphiInstall.pas',
   DelphiLsp.Gc in '..\src\units\DelphiLsp.Gc.pas',
+  DelphiLsp.LspWire in '..\src\units\DelphiLsp.LspWire.pas',
   DelphiLsp.XmlDecodeTests in 'DelphiLsp.XmlDecodeTests.pas',
   DelphiLsp.PathsTests in 'DelphiLsp.PathsTests.pas',
   DelphiLsp.WalkersTests in 'DelphiLsp.WalkersTests.pas',
@@ -39,7 +40,8 @@ uses
   DelphiLsp.SessionIdResolverTests in 'DelphiLsp.SessionIdResolverTests.pas',
   DelphiLsp.IOTests in 'DelphiLsp.IOTests.pas',
   DelphiLsp.DelphiInstallTests in 'DelphiLsp.DelphiInstallTests.pas',
-  DelphiLsp.GcTests in 'DelphiLsp.GcTests.pas';
+  DelphiLsp.GcTests in 'DelphiLsp.GcTests.pas',
+  DelphiLsp.LspWireTests in 'DelphiLsp.LspWireTests.pas';
 
 var
   Runner: ITestRunner;
