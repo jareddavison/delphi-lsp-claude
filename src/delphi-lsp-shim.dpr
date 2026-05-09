@@ -50,7 +50,8 @@ uses
   DelphiLsp.DprojParse,
   DelphiLsp.StickyState,
   DelphiLsp.PluginData,
-  DelphiLsp.SessionIdResolver;
+  DelphiLsp.SessionIdResolver,
+  DelphiLsp.IO;
 
 type
   TLspStream = class
@@ -1804,57 +1805,6 @@ begin
 end;
 
 { Hook mode (--hook-session-start) }
-
-// Drain stdin into a byte buffer. Hooks receive a small JSON object
-// (typically <2KB) on stdin, then EOF.
-function ReadAllStdin: TBytes;
-const
-  BufSize = 4096;
-var
-  StdinH: THandle;
-  Buf: array[0..BufSize - 1] of Byte;
-  Got: DWORD;
-  Total: Integer;
-begin
-  Total := 0;
-  SetLength(Result, 0);
-  StdinH := GetStdHandle(STD_INPUT_HANDLE);
-  while ReadFile(StdinH, Buf[0], BufSize, Got, nil) and (Got > 0) do
-  begin
-    SetLength(Result, Total + Integer(Got));
-    Move(Buf[0], Result[Total], Got);
-    Inc(Total, Integer(Got));
-  end;
-end;
-
-// Atomic UTF-8 file write via tmp+MoveFileEx. Same pattern WriteStickyForCwd
-// uses; pulled out as a generic helper since the hook needs it twice.
-procedure WriteFileAtomic(const Path, Content: string);
-var
-  TmpPath: string;
-  Bytes: TBytes;
-  FS: TFileStream;
-begin
-  TmpPath := Path + '.tmp';
-  Bytes := TEncoding.UTF8.GetBytes(Content);
-  try
-    FS := TFileStream.Create(TmpPath, fmCreate);
-    try
-      if Length(Bytes) > 0 then
-        FS.WriteBuffer(Bytes[0], Length(Bytes));
-    finally
-      FS.Free;
-    end;
-  except
-    on E: Exception do
-    begin
-      Diag('WriteFileAtomic tmp write failed: ' + E.Message);
-      Exit;
-    end;
-  end;
-  if not MoveFileEx(PChar(TmpPath), PChar(Path), MOVEFILE_REPLACE_EXISTING) then
-    Diag(Format('WriteFileAtomic MoveFileEx failed: %d', [GetLastError]));
-end;
 
 // Forward decls — DCU-resolution helpers live further down (grouped with
 // other dccOptions parsing), but EmitMultiCandidatePromptWithDcuActivity
