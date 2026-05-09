@@ -35,3 +35,6 @@ __recovery/
 Thumbs.db
 .DS_Store
 *.swp
+
+# Local-only resume / hand-off notes
+NEXT_SESSION_PROMPT.md
