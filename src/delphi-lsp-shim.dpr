@@ -52,7 +52,8 @@ uses
   DelphiLsp.PluginData,
   DelphiLsp.SessionIdResolver,
   DelphiLsp.IO,
-  DelphiLsp.DelphiInstall;
+  DelphiLsp.DelphiInstall,
+  DelphiLsp.Gc;
 
 type
   TLspStream = class
@@ -976,56 +977,6 @@ begin
     GSession.RecycleChild;
 end;
 
-// Walk sibling PID dirs under sessions/ and remove any whose PID is not
-// currently running. Crashed/killed shims (e.g. /reload-plugins mid-session)
-// leave dirs behind that would otherwise accumulate.
-procedure GcOrphanSessions(const SessionsRoot: string);
-const
-  // Available since Vista; not in Winapi.Windows on older RTLs.
-  PROCESS_QUERY_LIMITED_INFORMATION = $1000;
-var
-  SR: TSearchRec;
-  Pid: UInt32;
-  H: THandle;
-  ChildDir: string;
-  Removed: Integer;
-  SelfPid: DWORD;
-begin
-  Removed := 0;
-  SelfPid := GetCurrentProcessId;
-  if not DirectoryExists(SessionsRoot) then Exit;
-  if FindFirst(IncludeTrailingPathDelimiter(SessionsRoot) + '*', faDirectory, SR) <> 0 then
-    Exit;
-  try
-    repeat
-      if (SR.Name = '.') or (SR.Name = '..') then Continue;
-      if (SR.Attr and faDirectory) = 0 then Continue;
-      if not TryStrToUInt(SR.Name, Pid) then Continue;
-      if Pid = SelfPid then Continue;
-      H := OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, Pid);
-      if H <> 0 then
-      begin
-        CloseHandle(H);
-        Continue;
-      end;
-      // Process gone; if OpenProcess failed for a different reason we'll
-      // still nuke the dir (a permission denial on someone else's PID is
-      // not realistic since the PID came out of our own data root).
-      ChildDir := IncludeTrailingPathDelimiter(SessionsRoot) + SR.Name;
-      try
-        TDirectory.Delete(ChildDir, True);
-        Inc(Removed);
-      except
-        on E: Exception do
-          Diag(Format('Orphan GC: failed to delete %s: %s', [ChildDir, E.Message]));
-      end;
-    until FindNext(SR) <> 0;
-  finally
-    FindClose(SR);
-  end;
-  if Removed > 0 then
-    Diag(Format('Orphan GC: removed %d stale session dir(s)', [Removed]));
-end;
 
 
 
@@ -1081,99 +1032,6 @@ end;
 
 
 
-// Sweep <plugin-data>/session-state/<id>.json for sessions whose .jsonl is
-// gone. Conservative — keeps anything that might still be resumable. Skips
-// the current session's bindings (never GC ourselves).
-procedure GcStaleSessionState;
-var
-  Base, Dir, FullPath, SessionId, ProjectsRoot: string;
-  SR: TSearchRec;
-  Removed: Integer;
-begin
-  Base := ResolvePluginDataBase;
-  if Base = '' then Exit;
-  Dir := IncludeTrailingPathDelimiter(Base) + 'session-state';
-  if not DirectoryExists(Dir) then Exit;
-  ProjectsRoot := ResolveProjectsRoot;
-  Removed := 0;
-  if FindFirst(IncludeTrailingPathDelimiter(Dir) + '*.json', faAnyFile, SR) = 0 then
-  try
-    repeat
-      if (SR.Attr and faDirectory) <> 0 then Continue;
-      SessionId := ChangeFileExt(SR.Name, '');
-      if SameText(SessionId, GClaudeSessionId) then Continue;
-      if IsClaudeSessionAlive(ProjectsRoot, SessionId) then Continue;
-      FullPath := IncludeTrailingPathDelimiter(Dir) + SR.Name;
-      if DeleteFile(PChar(FullPath)) then
-        Inc(Removed)
-      else
-        Diag(Format('GC sticky delete failed: %s (gle=%d)', [SR.Name, GetLastError]));
-    until FindNext(SR) <> 0;
-  finally
-    FindClose(SR);
-  end;
-  if Removed > 0 then
-    Diag(Format('GC: removed %d stale session-state file(s)', [Removed]));
-end;
-
-// Sweep <plugin-data>/claude-pid/. Two file kinds:
-//   <pid>.json: hook ancestor drop file. GC if PID is no longer running —
-//     PID-reuse safety: stale entries could otherwise resolve to a wrong
-//     session if a future Claude Code instance happens to inherit that PID.
-//   by-id-<session-id>.json: GC if the session's .jsonl is gone.
-procedure GcStaleClaudePidFiles;
-const
-  ByIdPrefix = 'by-id-';
-  PROCESS_QUERY_LIMITED_INFORMATION = $1000;
-var
-  Base, Dir, FullPath, BaseName, SessionId, ProjectsRoot: string;
-  SR: TSearchRec;
-  Pid: UInt32;
-  H: THandle;
-  Removed: Integer;
-begin
-  Base := ResolvePluginDataBase;
-  if Base = '' then Exit;
-  Dir := IncludeTrailingPathDelimiter(Base) + 'claude-pid';
-  if not DirectoryExists(Dir) then Exit;
-  ProjectsRoot := ResolveProjectsRoot;
-  Removed := 0;
-  if FindFirst(IncludeTrailingPathDelimiter(Dir) + '*.json', faAnyFile, SR) = 0 then
-  try
-    repeat
-      if (SR.Attr and faDirectory) <> 0 then Continue;
-      BaseName := ChangeFileExt(SR.Name, '');
-      FullPath := IncludeTrailingPathDelimiter(Dir) + SR.Name;
-      if (Length(BaseName) > Length(ByIdPrefix)) and
-         SameText(Copy(BaseName, 1, Length(ByIdPrefix)), ByIdPrefix) then
-      begin
-        SessionId := Copy(BaseName, Length(ByIdPrefix) + 1, MaxInt);
-        if IsClaudeSessionAlive(ProjectsRoot, SessionId) then Continue;
-        if DeleteFile(PChar(FullPath)) then
-          Inc(Removed)
-        else
-          Diag(Format('GC by-id delete failed: %s (gle=%d)', [SR.Name, GetLastError]));
-      end
-      else if TryStrToUInt(BaseName, Pid) then
-      begin
-        H := OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, Pid);
-        if H <> 0 then
-        begin
-          CloseHandle(H);
-          Continue;
-        end;
-        if DeleteFile(PChar(FullPath)) then
-          Inc(Removed)
-        else
-          Diag(Format('GC pid-keyed delete failed: %s (gle=%d)', [SR.Name, GetLastError]));
-      end;
-    until FindNext(SR) <> 0;
-  finally
-    FindClose(SR);
-  end;
-  if Removed > 0 then
-    Diag(Format('GC: removed %d stale claude-pid file(s)', [Removed]));
-end;
 
 procedure InitSessionState;
 var
@@ -1289,7 +1147,7 @@ begin
     Exit;
   end;
   SessionsRoot := IncludeTrailingPathDelimiter(Base) + 'sessions';
-  GcOrphanSessions(SessionsRoot);
+  GcOrphanSessions(SessionsRoot, GetCurrentProcessId);
   GSessionDir := IncludeTrailingPathDelimiter(SessionsRoot) +
                  IntToStr(GetCurrentProcessId);
   GActiveSentinelPath := IncludeTrailingPathDelimiter(GSessionDir) + 'active.txt';
@@ -2220,8 +2078,13 @@ begin
     // IsClaudeSessionAlive), so guard both together.
     if (GClaudeSessionId <> '') and IsClaudeSessionAlive(ResolveProjectsRoot, GClaudeSessionId) then
     begin
-      GcStaleSessionState;
-      GcStaleClaudePidFiles;
+      GcStaleSessionState(
+        IncludeTrailingPathDelimiter(ResolvePluginDataBase) + 'session-state',
+        ResolveProjectsRoot,
+        GClaudeSessionId);
+      GcStaleClaudePidFiles(
+        IncludeTrailingPathDelimiter(ResolvePluginDataBase) + 'claude-pid',
+        ResolveProjectsRoot);
     end
     else
       Diag('GC: skipping (own session .jsonl not found or session id unresolved)');
