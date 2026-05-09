@@ -26,6 +26,7 @@ uses
   DelphiLsp.PluginData in '..\src\units\DelphiLsp.PluginData.pas',
   DelphiLsp.SessionIdResolver in '..\src\units\DelphiLsp.SessionIdResolver.pas',
   DelphiLsp.IO in '..\src\units\DelphiLsp.IO.pas',
+  DelphiLsp.DelphiInstall in '..\src\units\DelphiLsp.DelphiInstall.pas',
   DelphiLsp.XmlDecodeTests in 'DelphiLsp.XmlDecodeTests.pas',
   DelphiLsp.PathsTests in 'DelphiLsp.PathsTests.pas',
   DelphiLsp.WalkersTests in 'DelphiLsp.WalkersTests.pas',
@@ -35,7 +36,8 @@ uses
   DelphiLsp.StickyStateTests in 'DelphiLsp.StickyStateTests.pas',
   DelphiLsp.PluginDataTests in 'DelphiLsp.PluginDataTests.pas',
   DelphiLsp.SessionIdResolverTests in 'DelphiLsp.SessionIdResolverTests.pas',
-  DelphiLsp.IOTests in 'DelphiLsp.IOTests.pas';
+  DelphiLsp.IOTests in 'DelphiLsp.IOTests.pas',
+  DelphiLsp.DelphiInstallTests in 'DelphiLsp.DelphiInstallTests.pas';
 
 var
   Runner: ITestRunner;
