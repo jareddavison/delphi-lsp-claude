@@ -49,7 +49,8 @@ uses
   DelphiLsp.ProcessTree,
   DelphiLsp.DprojParse,
   DelphiLsp.StickyState,
-  DelphiLsp.PluginData;
+  DelphiLsp.PluginData,
+  DelphiLsp.SessionIdResolver;
 
 type
   TLspStream = class
@@ -1220,33 +1221,6 @@ begin
   end;
 end;
 
-// Look for `--claude-session-id=<id>` in argv. The plugin manifest passes
-// this via `args: ["--claude-session-id=${CLAUDE_CODE_SESSION_ID}"]` so the
-// shim can recover the session id even if Claude Code doesn't propagate the
-// env var to LSP subprocesses. Returns '' if absent or if the placeholder
-// failed to substitute (still literally "${CLAUDE_CODE_SESSION_ID}").
-function ParseSessionIdFromArgv: string;
-const
-  Prefix = '--claude-session-id=';
-var
-  I: Integer;
-  Arg: string;
-begin
-  Result := '';
-  for I := 1 to ParamCount do
-  begin
-    Arg := ParamStr(I);
-    if (Length(Arg) > Length(Prefix)) and SameText(Copy(Arg, 1, Length(Prefix)), Prefix) then
-    begin
-      Result := Copy(Arg, Length(Prefix) + 1, MaxInt);
-      // Guard against unsubstituted placeholder (Claude Code didn't expand
-      // ${CLAUDE_CODE_SESSION_ID} — older client, env var missing, etc.).
-      if (Pos('${', Result) > 0) or (Result = '${CLAUDE_CODE_SESSION_ID}') then
-        Result := '';
-      Exit;
-    end;
-  end;
-end;
 
 procedure DumpArgv;
 var
@@ -1263,190 +1237,6 @@ begin
 end;
 
 
-// Scan <plugin-data>/claude-pid/by-id-*.json (deposited by SessionStart
-// hooks), pick the one whose `cwd` field matches our cwd canonically AND
-// is most recently modified. The session_id from that file is the answer.
-//
-// Why this exists: SessionStart hook on Windows runs in MinGW bash, where
-// $PPID resolves to 1 (process tree reparenting). So we can't key the
-// hook drop file by Claude Code PID. Instead the hook keys by session_id
-// (which it knows from stdin payload) AND records cwd. The shim does the
-// correlation via cwd match + most-recent mtime as tiebreak.
-//
-// Race window for simultaneous same-cwd sessions: only between hook drop
-// times (sub-second). The mtime tiebreak picks whichever fired last, which
-// is "most recently started or resumed" — the closest signal we have to
-// "this current shim's session" without a real PID channel.
-function ResolveSessionIdViaHookFiles(const Cwd: string): string;
-const
-  Pattern = 'by-id-*.json';
-var
-  Base, Dir, FullPath, Content, EntryCwd, EntrySid, TargetCwd: string;
-  SR: TSearchRec;
-  BestSid: string;
-  BestAge: TDateTime;
-  Root, IdVal, CwdVal: TJSONValue;
-begin
-  Result := '';
-  Base := ResolvePluginDataBase;
-  if Base = '' then Exit;
-  Dir := IncludeTrailingPathDelimiter(Base) + 'claude-pid';
-  if not DirectoryExists(Dir) then Exit;
-
-  TargetCwd := CanonicalizeCwd(Cwd);
-  if TargetCwd = '' then Exit;
-
-  BestSid := '';
-  BestAge := 0;
-  if FindFirst(IncludeTrailingPathDelimiter(Dir) + Pattern, faAnyFile, SR) = 0 then
-  try
-    repeat
-      FullPath := IncludeTrailingPathDelimiter(Dir) + SR.Name;
-      try
-        Content := TFile.ReadAllText(FullPath, TEncoding.UTF8);
-      except
-        on E: Exception do
-        begin
-          Diag('Hook by-id read failed for ' + SR.Name + ': ' + E.Message);
-          Continue;
-        end;
-      end;
-      Root := nil;
-      try
-        try
-          Root := TJSONObject.ParseJSONValue(Content);
-        except
-          Continue;
-        end;
-        if not (Root is TJSONObject) then Continue;
-        IdVal := TJSONObject(Root).GetValue('session_id');
-        CwdVal := TJSONObject(Root).GetValue('cwd');
-        if (IdVal = nil) or (CwdVal = nil) then Continue;
-        EntrySid := IdVal.Value;
-        EntryCwd := CwdVal.Value;
-        if CanonicalizeCwd(EntryCwd) <> TargetCwd then Continue;
-        if (BestSid = '') or (SR.TimeStamp > BestAge) then
-        begin
-          BestSid := EntrySid;
-          BestAge := SR.TimeStamp;
-        end;
-      finally
-        Root.Free;
-      end;
-    until FindNext(SR) <> 0;
-  finally
-    FindClose(SR);
-  end;
-
-  if BestSid <> '' then
-    Diag('Hook by-id scan: matched session ' + BestSid + ' for cwd ' + Cwd);
-  Result := BestSid;
-end;
-
-// Read a session_id from a SessionStart hook's drop file at
-// <plugin-data>/claude-pid/<key>.json. Returns '' if no file or no
-// session_id field. Try a list of candidate keys (initialize processId,
-// shim PPID) — first hit wins. Note: on Windows-MinGW bash hooks,
-// $PPID resolves to 1, making this path unusable today; kept in case
-// hook PPID resolution gets fixed (e.g. via a Delphi companion exe).
-function ReadSessionIdFromHookFile(const Key: string): string;
-var
-  Base, Path, Content: string;
-  Root, IdVal: TJSONValue;
-begin
-  Result := '';
-  Base := ResolvePluginDataBase;
-  if (Base = '') or (Key = '') then Exit;
-  Path := IncludeTrailingPathDelimiter(Base) + 'claude-pid' +
-          PathDelim + Key + '.json';
-  if not FileExists(Path) then Exit;
-  try
-    Content := TFile.ReadAllText(Path, TEncoding.UTF8);
-  except
-    on E: Exception do
-    begin
-      Diag('Hook-file read failed: ' + E.Message);
-      Exit;
-    end;
-  end;
-  Root := nil;
-  try
-    try
-      Root := TJSONObject.ParseJSONValue(Content);
-    except
-      on E: Exception do
-      begin
-        Diag('Hook-file parse failed: ' + E.Message);
-        Exit;
-      end;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    IdVal := TJSONObject(Root).GetValue('session_id');
-    if (IdVal <> nil) and (IdVal is TJSONString) then
-      Result := TJSONString(IdVal).Value;
-  finally
-    Root.Free;
-  end;
-end;
-
-// Last-resort discovery: Claude Code stores per-session conversation logs at
-// ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl. The encoded form
-// replaces ':' and '\' with '-' (so D:\Documents\TestDproj becomes
-// D--Documents-TestDproj). Most-recently-modified .jsonl in the matching
-// project dir is the active session — its filename (sans .jsonl) is the id.
-//
-// Fallback only — Claude Code 2.1.x doesn't propagate CLAUDE_CODE_SESSION_ID
-// to LSP subprocesses (env) and ${CLAUDE_CODE_SESSION_ID} substitution in
-// manifest args isn't supported (substitution is limited to CLAUDE_PLUGIN_ROOT
-// / CLAUDE_PLUGIN_DATA). Verified 2026-05-07. If that changes, env/argv paths
-// take precedence and this function never runs. Coupled to Claude Code's
-// internal storage layout — re-verify if it stops working.
-
-function DiscoverSessionIdFromProjectsDir(const Cwd: string): string;
-const
-  Suffix = '.jsonl';
-var
-  ProjectsRoot, EncodedCwd, ProjectDir, BestName: string;
-  SR: TSearchRec;
-  BestAge: TDateTime;
-begin
-  Result := '';
-  ProjectsRoot := ResolveProjectsRoot;
-  if not DirectoryExists(ProjectsRoot) then Exit;
-
-  EncodedCwd := StringReplace(Cwd, ':', '-', [rfReplaceAll]);
-  EncodedCwd := StringReplace(EncodedCwd, '\', '-', [rfReplaceAll]);
-  EncodedCwd := StringReplace(EncodedCwd, '/', '-', [rfReplaceAll]);
-  ProjectDir := IncludeTrailingPathDelimiter(ProjectsRoot) + EncodedCwd;
-  if not DirectoryExists(ProjectDir) then
-  begin
-    Diag('Projects-dir scan: no dir for ' + EncodedCwd);
-    Exit;
-  end;
-
-  BestName := ''; BestAge := 0;
-  if FindFirst(IncludeTrailingPathDelimiter(ProjectDir) + '*' + Suffix, faAnyFile, SR) = 0 then
-  try
-    repeat
-      if (BestName = '') or (SR.TimeStamp > BestAge) then
-      begin
-        BestName := SR.Name;
-        BestAge := SR.TimeStamp;
-      end;
-    until FindNext(SR) <> 0;
-  finally
-    FindClose(SR);
-  end;
-
-  if BestName <> '' then
-  begin
-    Result := Copy(BestName, 1, Length(BestName) - Length(Suffix));
-    Diag(Format('Projects-dir scan: most-recent %s in %s -> session id %s',
-      [BestName, ProjectDir, Result]));
-  end
-  else
-    Diag('Projects-dir scan: no .jsonl in ' + ProjectDir);
-end;
 
 
 // Sweep <plugin-data>/session-state/<id>.json for sessions whose .jsonl is
@@ -1545,7 +1335,7 @@ end;
 
 procedure InitSessionState;
 var
-  Base, FromArg, FromScan: string;
+  Base, FromArg, FromScan, ClaudePidDir: string;
   Ancestors: TArray<DWORD>;
   AncIdx: Integer;
   AncId: DWORD;
@@ -1579,6 +1369,9 @@ begin
     end
     else
     begin
+      // Resolve <plugin-data>/claude-pid once; the resolvers operate against it.
+      ClaudePidDir := IncludeTrailingPathDelimiter(ResolvePluginDataBase) + 'claude-pid';
+
       // Walk the shim's process ancestry looking for any hook drop file
       // keyed by an ancestor PID. The hook writes one file per ancestor;
       // we walk ours from the bottom up. They share Claude Code's main
@@ -1591,7 +1384,7 @@ begin
       begin
         AncId := Ancestors[AncIdx];
         Diag(Format('  ancestor[%d]=%d', [AncIdx, AncId]));
-        FromScan := ReadSessionIdFromHookFile(IntToStr(AncId));
+        FromScan := ReadSessionIdFromHookFile(ClaudePidDir, IntToStr(AncId));
         if FromScan <> '' then
         begin
           GClaudeSessionId := FromScan;
@@ -1605,7 +1398,7 @@ begin
       begin
         // Fallback: by-id-*.json scan + cwd canonical match. Used to be
         // the primary on Windows when hook PPID was wrong; now a backstop.
-        FromScan := ResolveSessionIdViaHookFiles(GetCurrentDir);
+        FromScan := ResolveSessionIdViaHookFiles(ClaudePidDir, GetCurrentDir);
         if FromScan <> '' then
         begin
           GClaudeSessionId := FromScan;
@@ -1617,7 +1410,7 @@ begin
       begin
         // Last resort: most-recent .jsonl mtime in projects dir. Race window
         // for simultaneous same-cwd sessions.
-        FromScan := DiscoverSessionIdFromProjectsDir(GetCurrentDir);
+        FromScan := DiscoverSessionIdFromProjectsDir(ResolveProjectsRoot, GetCurrentDir);
         if FromScan <> '' then
         begin
           GClaudeSessionId := FromScan;

@@ -24,6 +24,7 @@ uses
   DelphiLsp.DprojParse in '..\src\units\DelphiLsp.DprojParse.pas',
   DelphiLsp.StickyState in '..\src\units\DelphiLsp.StickyState.pas',
   DelphiLsp.PluginData in '..\src\units\DelphiLsp.PluginData.pas',
+  DelphiLsp.SessionIdResolver in '..\src\units\DelphiLsp.SessionIdResolver.pas',
   DelphiLsp.XmlDecodeTests in 'DelphiLsp.XmlDecodeTests.pas',
   DelphiLsp.PathsTests in 'DelphiLsp.PathsTests.pas',
   DelphiLsp.WalkersTests in 'DelphiLsp.WalkersTests.pas',
@@ -31,7 +32,8 @@ uses
   DelphiLsp.ProcessTreeTests in 'DelphiLsp.ProcessTreeTests.pas',
   DelphiLsp.DprojParseTests in 'DelphiLsp.DprojParseTests.pas',
   DelphiLsp.StickyStateTests in 'DelphiLsp.StickyStateTests.pas',
-  DelphiLsp.PluginDataTests in 'DelphiLsp.PluginDataTests.pas';
+  DelphiLsp.PluginDataTests in 'DelphiLsp.PluginDataTests.pas',
+  DelphiLsp.SessionIdResolverTests in 'DelphiLsp.SessionIdResolverTests.pas';
 
 var
   Runner: ITestRunner;
