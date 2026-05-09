@@ -2,7 +2,9 @@
 
 > **Note:** The source and documentation in this project were AI-generated (Claude Code). Review before trusting in production.
 
-A Claude Code code-intelligence plugin that wires Embarcadero's DelphiLSP into Claude Code, mirroring how the official VS Code extension (`embarcaderotechnologies.delphilsp`) launches the server. Adds:
+**Why this exists**: Claude Code's official marketplace ships LSP integrations for Rust, Go, Kotlin, TypeScript, and others — they tighten the feedback loop on generated code by surfacing compile errors automatically and letting the LLM verify symbols before referencing them. Delphi didn't have one. This plugin fills the gap by wiring Embarcadero's `DelphiLSP.exe` (the same server VS Code uses) into Claude Code, mirroring how the official VS Code extension (`embarcaderotechnologies.delphilsp`) launches it.
+
+What it adds:
 
 - **Hover, go-to-definition, find references, document/workspace symbols** via DelphiLSP.
 - **Push diagnostics** — DelphiLSP analyzes after every edit, errors arrive in the same turn.
