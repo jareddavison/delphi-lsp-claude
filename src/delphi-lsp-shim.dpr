@@ -37,8 +37,6 @@ uses
   System.JSON,
   System.SyncObjs,
   System.Hash,
-  System.RegularExpressions,
-  System.Win.Registry,
   System.Generics.Collections,
   System.Generics.Defaults,
   DelphiLsp.XmlDecode,
@@ -54,7 +52,8 @@ uses
   DelphiLsp.IO,
   DelphiLsp.DelphiInstall,
   DelphiLsp.Gc,
-  DelphiLsp.LspWire;
+  DelphiLsp.LspWire,
+  DelphiLsp.LspPathResolver;
 
 type
   TChildReaderThread = class(TThread)
@@ -212,122 +211,6 @@ begin
   end;
 end;
 
-{ DelphiLSP path resolution — registry walking + .delphilsp.json hinting }
-
-// Read RootDir for a specific BDS version from the registry. Tries the
-// 32-bit Wow6432Node hive first (RAD Studio is a 32-bit app, installer puts
-// keys there on x64 Windows), then the bare HKLM, then HKCU. Returns
-// '' if not found. Result has its trailing path delimiter stripped for
-// consistent concatenation by callers.
-// Pick the DelphiLSP.exe to spawn from a given BDS install root. Default
-// behaviour: prefer `bin64\DelphiLSP.exe` (64-bit native, faster + larger
-// address space; ships in higher-tier SKUs), fall back to `bin\DelphiLSP.exe`
-// (32-bit, all SKUs).
-//
-// Override via env var DELPHI_LSP_BITS:
-//   DELPHI_LSP_BITS=32 — only consider 32-bit (e.g. when the 64-bit binary
-//                       has a bug specific to a project's compiler defines).
-//   DELPHI_LSP_BITS=64 — only consider 64-bit (fail loudly if missing
-//                       instead of silently falling back).
-//   (unset/empty/other) — default 64-then-32 fallback.
-//
-// Returns '' if no candidate satisfies the preference. Caller decides what
-// to do — usually fall through to the next resolution rule.
-
-// Resolution order for which DelphiLSP.exe to spawn:
-//   1. DELPHI_LSP_EXE env var (explicit absolute path or PATH name)
-//   2. <session>/runtime.txt (set by /delphi-runtime; version "37.0" or full path)
-//   3. Version hinted by the active .delphilsp.json (the IDE that wrote it)
-//   4. Highest installed BDS with DelphiLSP.exe under bin/
-//   5. Bare 'DelphiLSP.exe' (relies on PATH)
-// `Source` describes which rule won, for the spawn-time log line.
-function ResolveDelphiLspPath(const SettingsPath, SessionDir: string; out Source: string): string;
-var
-  Override_, RuntimePath, RuntimeContent, VerHint, Root, HighestVer: string;
-  Lines: TStringList;
-begin
-  Source := '';
-
-  Override_ := GetEnv('DELPHI_LSP_EXE', '');
-  if Override_ <> '' then
-  begin
-    Source := 'DELPHI_LSP_EXE';
-    Exit(Override_);
-  end;
-
-  if SessionDir <> '' then
-  begin
-    RuntimePath := IncludeTrailingPathDelimiter(SessionDir) + 'runtime.txt';
-    if FileExists(RuntimePath) then
-    begin
-      RuntimeContent := '';
-      Lines := TStringList.Create;
-      try
-        try
-          Lines.LoadFromFile(RuntimePath, TEncoding.UTF8);
-          if Lines.Count > 0 then RuntimeContent := Trim(Lines[0]);
-        except
-          on E: Exception do Diag('runtime.txt read failed: ' + E.Message);
-        end;
-      finally
-        Lines.Free;
-      end;
-      if RuntimeContent <> '' then
-      begin
-        if (Pos('\', RuntimeContent) > 0) or (Pos('/', RuntimeContent) > 0) or
-           SameText(ExtractFileExt(RuntimeContent), '.exe') then
-        begin
-          Source := 'runtime.txt:path';
-          Exit(RuntimeContent);
-        end;
-        Root := FindBdsRootDir(RuntimeContent);
-        if Root <> '' then
-        begin
-          Result := FindDelphiLspExeUnder(Root);
-          if Result <> '' then
-          begin
-            Source := 'runtime.txt:version=' + RuntimeContent;
-            Exit;
-          end;
-        end;
-        Diag('runtime.txt version not resolvable: ' + RuntimeContent);
-      end;
-    end;
-  end;
-
-  if SettingsPath <> '' then
-  begin
-    VerHint := ExtractBdsVersionFromSettings(SettingsPath);
-    if VerHint <> '' then
-    begin
-      Root := FindBdsRootDir(VerHint);
-      if Root <> '' then
-      begin
-        Result := FindDelphiLspExeUnder(Root);
-        if Result <> '' then
-        begin
-          Source := Format('hinted by %s (BDS %s)', [ExtractFileName(SettingsPath), VerHint]);
-          Exit;
-        end;
-      end;
-      Diag(Format('Settings hinted BDS %s but DelphiLSP.exe not found', [VerHint]));
-    end;
-  end;
-
-  HighestVer := FindHighestBdsVersion(Root);
-  if (HighestVer <> '') and (Root <> '') then
-  begin
-    Result := FindDelphiLspExeUnder(Root);
-    if Result <> '' then
-    begin
-      Source := Format('highest installed (BDS %s)', [HighestVer]);
-      Exit;
-    end;
-  end;
-
-  Source := 'PATH (no registry match)';
-  Result := 'DelphiLSP.exe';
-end;
 
 { TLspSession }
 
