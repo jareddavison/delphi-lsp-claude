@@ -78,10 +78,33 @@ procedure ApplyContentChange(var Text: string; const Change: TJSONObject);
 // missing, not numeric, or out of DWORD range.
 function ExtractInitializeProcessId(const Json: string): DWORD;
 
+// Parse a textDocument/didOpen notification. Returns False on parse
+// failure, structural mismatch, or missing required fields (uri /
+// languageId / version / text). On True, fills Uri and Doc; on False
+// both stay zero-valued.
+function TryParseDidOpen(const Json: string; out Uri: string;
+  out Doc: TOpenDocument): Boolean;
+
+// Extract `params.textDocument.uri` from a textDocument/* notification
+// (used for didChange and didClose, where the caller wants the uri to
+// look up the doc before applying any state changes). Returns False on
+// parse failure, structural mismatch, or missing/empty uri.
+function TryExtractTextDocumentUri(const Json: string;
+  out Uri: string): Boolean;
+
+// Parse a textDocument/didChange notification and apply its
+// contentChanges to Doc in place (Text mutated, Version updated when
+// the message specifies one). Returns False on parse failure or
+// missing uri/structure; in that case Doc is unchanged. The caller
+// should have already looked up Doc by uri.
+function TryApplyDidChange(const Json: string;
+  var Doc: TOpenDocument): Boolean;
+
 implementation
 
 uses
   System.SysUtils,
+  System.Generics.Collections,
   DelphiLsp.Logging;
 
 function GetMessageMethod(const Json: string): string;
@@ -324,6 +347,134 @@ begin
     if PidStr = '' then Exit;
     if TryStrToInt64(PidStr, Tmp) and (Tmp > 0) and (Tmp <= High(DWORD)) then
       Result := DWORD(Tmp);
+  finally
+    Root.Free;
+  end;
+end;
+
+function TryParseDidOpen(const Json: string; out Uri: string;
+  out Doc: TOpenDocument): Boolean;
+var
+  Root: TJSONValue;
+  Obj, Params, TextDoc: TJSONObject;
+  ParamsVal, TextDocVal, V: TJSONValue;
+begin
+  Result := False;
+  Uri := '';
+  Doc.LanguageId := '';
+  Doc.Version := 0;
+  Doc.Text := '';
+  Root := nil;
+  try
+    try
+      Root := TJSONObject.ParseJSONValue(Json);
+    except
+      Exit;
+    end;
+    if not (Root is TJSONObject) then Exit;
+    Obj := TJSONObject(Root);
+    ParamsVal := Obj.GetValue('params');
+    if not (ParamsVal is TJSONObject) then Exit;
+    Params := TJSONObject(ParamsVal);
+    TextDocVal := Params.GetValue('textDocument');
+    if not (TextDocVal is TJSONObject) then Exit;
+    TextDoc := TJSONObject(TextDocVal);
+    V := TextDoc.GetValue('uri');
+    if (V = nil) or (V.Value = '') then Exit;
+    Uri := V.Value;
+    V := TextDoc.GetValue('languageId');
+    if V = nil then Exit;
+    Doc.LanguageId := V.Value;
+    V := TextDoc.GetValue('version');
+    if V = nil then Exit;
+    Doc.Version := StrToIntDef(V.Value, 0);
+    V := TextDoc.GetValue('text');
+    if V = nil then Exit;
+    Doc.Text := V.Value;
+    Result := True;
+  finally
+    Root.Free;
+  end;
+end;
+
+function TryExtractTextDocumentUri(const Json: string;
+  out Uri: string): Boolean;
+var
+  Root: TJSONValue;
+  Obj, Params, TextDoc: TJSONObject;
+  ParamsVal, TextDocVal, UriVal: TJSONValue;
+begin
+  Result := False;
+  Uri := '';
+  Root := nil;
+  try
+    try
+      Root := TJSONObject.ParseJSONValue(Json);
+    except
+      Exit;
+    end;
+    if not (Root is TJSONObject) then Exit;
+    Obj := TJSONObject(Root);
+    ParamsVal := Obj.GetValue('params');
+    if not (ParamsVal is TJSONObject) then Exit;
+    Params := TJSONObject(ParamsVal);
+    TextDocVal := Params.GetValue('textDocument');
+    if not (TextDocVal is TJSONObject) then Exit;
+    TextDoc := TJSONObject(TextDocVal);
+    UriVal := TextDoc.GetValue('uri');
+    if (UriVal = nil) or (UriVal.Value = '') then Exit;
+    Uri := UriVal.Value;
+    Result := True;
+  finally
+    Root.Free;
+  end;
+end;
+
+function TryApplyDidChange(const Json: string;
+  var Doc: TOpenDocument): Boolean;
+var
+  Root: TJSONValue;
+  Obj, Params, TextDoc, ChangeObj: TJSONObject;
+  ParamsVal, TextDocVal, UriVal, VerVal: TJSONValue;
+  Changes: TJSONArray;
+  ChangesVal: TJSONValue;
+  I: Integer;
+begin
+  Result := False;
+  Root := nil;
+  try
+    try
+      Root := TJSONObject.ParseJSONValue(Json);
+    except
+      Exit;
+    end;
+    if not (Root is TJSONObject) then Exit;
+    Obj := TJSONObject(Root);
+    ParamsVal := Obj.GetValue('params');
+    if not (ParamsVal is TJSONObject) then Exit;
+    Params := TJSONObject(ParamsVal);
+    TextDocVal := Params.GetValue('textDocument');
+    if not (TextDocVal is TJSONObject) then Exit;
+    TextDoc := TJSONObject(TextDocVal);
+    UriVal := TextDoc.GetValue('uri');
+    if (UriVal = nil) or (UriVal.Value = '') then Exit;
+
+    // Validated enough to mutate Doc.
+    VerVal := TextDoc.GetValue('version');
+    if VerVal <> nil then
+      Doc.Version := StrToIntDef(VerVal.Value, Doc.Version);
+    ChangesVal := Params.GetValue('contentChanges');
+    if ChangesVal is TJSONArray then
+    begin
+      Changes := TJSONArray(ChangesVal);
+      for I := 0 to Changes.Count - 1 do
+      begin
+        ChangeObj := TJSONObject(Changes.Items[I]);
+        if ChangeObj <> nil then
+          ApplyContentChange(Doc.Text, ChangeObj);
+      end;
+    end;
+    Result := True;
   finally
     Root.Free;
   end;

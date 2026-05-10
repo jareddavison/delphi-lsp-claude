@@ -397,13 +397,8 @@ end;
 // makes no further locking.
 procedure TLspSession.TrackOutgoingMessageLocked(const Json: string; const Method: string);
 var
-  Root: TJSONValue;
-  Obj, Params, TextDoc, ChangeObj: TJSONObject;
   Uri: string;
   Doc: TOpenDocument;
-  Changes: TJSONArray;
-  I: Integer;
-  Found: Boolean;
 begin
   if (Method = 'initialize') and (FCachedInitJson = '') then
   begin
@@ -417,70 +412,33 @@ begin
     Diag('Cached initialized notification');
     Exit;
   end;
-  if (Method <> 'textDocument/didOpen') and
-     (Method <> 'textDocument/didChange') and
-     (Method <> 'textDocument/didClose') then
-    Exit;
 
-  Root := nil;
-  try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
+  if Method = 'textDocument/didOpen' then
+  begin
+    if not TryParseDidOpen(Json, Uri, Doc) then Exit;
+    FOpenDocs.AddOrSetValue(Uri, Doc);
+    Diag(Format('didOpen tracked: %s (lang=%s, ver=%d, len=%d)',
+      [Uri, Doc.LanguageId, Doc.Version, Length(Doc.Text)]));
+  end
+  else if Method = 'textDocument/didChange' then
+  begin
+    if not TryExtractTextDocumentUri(Json, Uri) then Exit;
+    if not FOpenDocs.TryGetValue(Uri, Doc) then
+    begin
+      Diag('didChange for untracked document: ' + Uri);
       Exit;
     end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := TJSONObject(Root);
-    Params := TJSONObject(Obj.GetValue('params'));
-    if not (Params is TJSONObject) then Exit;
-    TextDoc := TJSONObject(Params.GetValue('textDocument'));
-    if not (TextDoc is TJSONObject) then Exit;
-    if (TextDoc.GetValue('uri') = nil) then Exit;
-    Uri := TextDoc.GetValue('uri').Value;
-    if Uri = '' then Exit;
-
-    if Method = 'textDocument/didOpen' then
-    begin
-      if (TextDoc.GetValue('languageId') = nil) or
-         (TextDoc.GetValue('version') = nil) or
-         (TextDoc.GetValue('text') = nil) then Exit;
-      Doc.LanguageId := TextDoc.GetValue('languageId').Value;
-      Doc.Version := StrToIntDef(TextDoc.GetValue('version').Value, 0);
-      Doc.Text := TextDoc.GetValue('text').Value;
+    if TryApplyDidChange(Json, Doc) then
       FOpenDocs.AddOrSetValue(Uri, Doc);
-      Diag(Format('didOpen tracked: %s (lang=%s, ver=%d, len=%d)',
-        [Uri, Doc.LanguageId, Doc.Version, Length(Doc.Text)]));
-    end
-    else if Method = 'textDocument/didChange' then
+  end
+  else if Method = 'textDocument/didClose' then
+  begin
+    if not TryExtractTextDocumentUri(Json, Uri) then Exit;
+    if FOpenDocs.ContainsKey(Uri) then
     begin
-      Found := FOpenDocs.TryGetValue(Uri, Doc);
-      if not Found then
-      begin
-        Diag('didChange for untracked document: ' + Uri);
-        Exit;
-      end;
-      if TextDoc.GetValue('version') <> nil then
-        Doc.Version := StrToIntDef(TextDoc.GetValue('version').Value, Doc.Version);
-      Changes := TJSONArray(Params.GetValue('contentChanges'));
-      if Changes <> nil then
-        for I := 0 to Changes.Count - 1 do
-        begin
-          ChangeObj := TJSONObject(Changes.Items[I]);
-          if ChangeObj <> nil then
-            ApplyContentChange(Doc.Text, ChangeObj);
-        end;
-      FOpenDocs.AddOrSetValue(Uri, Doc);
-    end
-    else if Method = 'textDocument/didClose' then
-    begin
-      if FOpenDocs.ContainsKey(Uri) then
-      begin
-        FOpenDocs.Remove(Uri);
-        Diag('didClose tracked: ' + Uri);
-      end;
+      FOpenDocs.Remove(Uri);
+      Diag('didClose tracked: ' + Uri);
     end;
-  finally
-    Root.Free;
   end;
 end;
 

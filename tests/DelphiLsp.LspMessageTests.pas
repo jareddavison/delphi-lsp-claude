@@ -49,6 +49,32 @@ type
     [Test] procedure ExtractInitializeProcessId_ReturnsPid;
     [Test] procedure ExtractInitializeProcessId_ReturnsZeroWhenMissing;
     [Test] procedure ExtractInitializeProcessId_ReturnsZeroForNonInitialize;
+
+    // TryParseDidOpen
+    [Test] procedure TryParseDidOpen_ValidMessage_ExtractsAllFields;
+    [Test] procedure TryParseDidOpen_MissingUri_ReturnsFalse;
+    [Test] procedure TryParseDidOpen_MissingLanguageId_ReturnsFalse;
+    [Test] procedure TryParseDidOpen_MissingVersion_ReturnsFalse;
+    [Test] procedure TryParseDidOpen_MissingText_ReturnsFalse;
+    [Test] procedure TryParseDidOpen_NoParams_ReturnsFalse;
+    [Test] procedure TryParseDidOpen_InvalidJson_ReturnsFalse;
+    [Test] procedure TryParseDidOpen_EmptyText_StillSucceeds;
+
+    // TryExtractTextDocumentUri
+    [Test] procedure TryExtractUri_DidChangeShape_Extracts;
+    [Test] procedure TryExtractUri_DidCloseShape_Extracts;
+    [Test] procedure TryExtractUri_MissingUri_ReturnsFalse;
+    [Test] procedure TryExtractUri_NoTextDocument_ReturnsFalse;
+    [Test] procedure TryExtractUri_InvalidJson_ReturnsFalse;
+
+    // TryApplyDidChange
+    [Test] procedure TryApplyDidChange_FullReplace_ReplacesText;
+    [Test] procedure TryApplyDidChange_IncrementalRange_AppliesEdit;
+    [Test] procedure TryApplyDidChange_MultipleChanges_AppliedInOrder;
+    [Test] procedure TryApplyDidChange_BumpsVersion;
+    [Test] procedure TryApplyDidChange_NoVersionField_PreservesVersion;
+    [Test] procedure TryApplyDidChange_NoUri_LeavesDocUntouched;
+    [Test] procedure TryApplyDidChange_EmptyChangesArray_Succeeds;
   end;
 
 implementation
@@ -320,6 +346,255 @@ begin
   Assert.IsTrue(ExtractInitializeProcessId(
     '{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"processId":12345}}'
   ) = 0);
+end;
+
+{ TryParseDidOpen }
+
+const
+  // Compact didOpen sample. \" / \n inside JSON 'text' field, and a
+  // realistic Pascal source body so the Length(Text) assertion is
+  // meaningful rather than counting an empty string.
+  DID_OPEN_VALID =
+    '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":' +
+    '{"textDocument":{"uri":"file:///D:/Foo.pas","languageId":"objectpascal",' +
+    '"version":1,"text":"unit Foo;\ninterface\nend."}}}';
+
+procedure TLspMessageTests.TryParseDidOpen_ValidMessage_ExtractsAllFields;
+var
+  Uri: string;
+  Doc: TOpenDocument;
+begin
+  Assert.IsTrue(TryParseDidOpen(DID_OPEN_VALID, Uri, Doc));
+  Assert.AreEqual('file:///D:/Foo.pas', Uri);
+  Assert.AreEqual('objectpascal', Doc.LanguageId);
+  Assert.IsTrue(Doc.Version = 1, 'expected version=1');
+  Assert.AreEqual('unit Foo;'#10'interface'#10'end.', Doc.Text);
+end;
+
+procedure TLspMessageTests.TryParseDidOpen_MissingUri_ReturnsFalse;
+var
+  Uri: string;
+  Doc: TOpenDocument;
+begin
+  Assert.IsFalse(TryParseDidOpen(
+    '{"params":{"textDocument":{"languageId":"objectpascal","version":1,"text":"x"}}}',
+    Uri, Doc));
+  Assert.AreEqual('', Uri);
+end;
+
+procedure TLspMessageTests.TryParseDidOpen_MissingLanguageId_ReturnsFalse;
+var
+  Uri: string;
+  Doc: TOpenDocument;
+begin
+  Assert.IsFalse(TryParseDidOpen(
+    '{"params":{"textDocument":{"uri":"u","version":1,"text":"x"}}}',
+    Uri, Doc));
+end;
+
+procedure TLspMessageTests.TryParseDidOpen_MissingVersion_ReturnsFalse;
+var
+  Uri: string;
+  Doc: TOpenDocument;
+begin
+  Assert.IsFalse(TryParseDidOpen(
+    '{"params":{"textDocument":{"uri":"u","languageId":"objectpascal","text":"x"}}}',
+    Uri, Doc));
+end;
+
+procedure TLspMessageTests.TryParseDidOpen_MissingText_ReturnsFalse;
+var
+  Uri: string;
+  Doc: TOpenDocument;
+begin
+  Assert.IsFalse(TryParseDidOpen(
+    '{"params":{"textDocument":{"uri":"u","languageId":"objectpascal","version":1}}}',
+    Uri, Doc));
+end;
+
+procedure TLspMessageTests.TryParseDidOpen_NoParams_ReturnsFalse;
+var
+  Uri: string;
+  Doc: TOpenDocument;
+begin
+  Assert.IsFalse(TryParseDidOpen('{"jsonrpc":"2.0","method":"x"}', Uri, Doc));
+end;
+
+procedure TLspMessageTests.TryParseDidOpen_InvalidJson_ReturnsFalse;
+var
+  Uri: string;
+  Doc: TOpenDocument;
+begin
+  Assert.IsFalse(TryParseDidOpen('{ broken', Uri, Doc));
+end;
+
+procedure TLspMessageTests.TryParseDidOpen_EmptyText_StillSucceeds;
+var
+  Uri: string;
+  Doc: TOpenDocument;
+begin
+  // Empty file is a legitimate didOpen — empty .pas stub being created.
+  Assert.IsTrue(TryParseDidOpen(
+    '{"params":{"textDocument":{"uri":"file:///x.pas","languageId":"objectpascal","version":0,"text":""}}}',
+    Uri, Doc));
+  Assert.AreEqual('', Doc.Text);
+end;
+
+{ TryExtractTextDocumentUri }
+
+procedure TLspMessageTests.TryExtractUri_DidChangeShape_Extracts;
+var
+  Uri: string;
+begin
+  Assert.IsTrue(TryExtractTextDocumentUri(
+    '{"method":"textDocument/didChange","params":' +
+    '{"textDocument":{"uri":"file:///A.pas","version":2},"contentChanges":[]}}',
+    Uri));
+  Assert.AreEqual('file:///A.pas', Uri);
+end;
+
+procedure TLspMessageTests.TryExtractUri_DidCloseShape_Extracts;
+var
+  Uri: string;
+begin
+  Assert.IsTrue(TryExtractTextDocumentUri(
+    '{"method":"textDocument/didClose","params":' +
+    '{"textDocument":{"uri":"file:///B.pas"}}}',
+    Uri));
+  Assert.AreEqual('file:///B.pas', Uri);
+end;
+
+procedure TLspMessageTests.TryExtractUri_MissingUri_ReturnsFalse;
+var
+  Uri: string;
+begin
+  Assert.IsFalse(TryExtractTextDocumentUri(
+    '{"params":{"textDocument":{}}}', Uri));
+  Assert.AreEqual('', Uri);
+end;
+
+procedure TLspMessageTests.TryExtractUri_NoTextDocument_ReturnsFalse;
+var
+  Uri: string;
+begin
+  Assert.IsFalse(TryExtractTextDocumentUri(
+    '{"params":{}}', Uri));
+end;
+
+procedure TLspMessageTests.TryExtractUri_InvalidJson_ReturnsFalse;
+var
+  Uri: string;
+begin
+  Assert.IsFalse(TryExtractTextDocumentUri('not json', Uri));
+end;
+
+{ TryApplyDidChange }
+
+procedure TLspMessageTests.TryApplyDidChange_FullReplace_ReplacesText;
+var
+  Doc: TOpenDocument;
+begin
+  Doc.LanguageId := 'objectpascal';
+  Doc.Version := 1;
+  Doc.Text := 'old contents';
+  Assert.IsTrue(TryApplyDidChange(
+    '{"method":"textDocument/didChange","params":' +
+    '{"textDocument":{"uri":"file:///x.pas","version":2},' +
+    '"contentChanges":[{"text":"new contents"}]}}',
+    Doc));
+  Assert.AreEqual('new contents', Doc.Text);
+  Assert.IsTrue(Doc.Version = 2, 'version should bump to 2');
+end;
+
+procedure TLspMessageTests.TryApplyDidChange_IncrementalRange_AppliesEdit;
+var
+  Doc: TOpenDocument;
+begin
+  Doc.Text := 'hello world';
+  Doc.Version := 1;
+  // Replace 'world' (chars 6..11) with 'Delphi'.
+  Assert.IsTrue(TryApplyDidChange(
+    '{"params":{"textDocument":{"uri":"file:///x.pas","version":2},' +
+    '"contentChanges":[{"range":{"start":{"line":0,"character":6},' +
+    '"end":{"line":0,"character":11}},"text":"Delphi"}]}}',
+    Doc));
+  Assert.AreEqual('hello Delphi', Doc.Text);
+end;
+
+procedure TLspMessageTests.TryApplyDidChange_MultipleChanges_AppliedInOrder;
+var
+  Doc: TOpenDocument;
+begin
+  // Two ops: first replaces 'foo' with 'bar' (full replace), then
+  // appends ' baz' via incremental insert at end. Order matters.
+  Doc.Text := 'foo';
+  Doc.Version := 1;
+  Assert.IsTrue(TryApplyDidChange(
+    '{"params":{"textDocument":{"uri":"file:///x.pas","version":2},' +
+    '"contentChanges":[' +
+    '{"text":"bar"},' +
+    '{"range":{"start":{"line":0,"character":3},' +
+    '"end":{"line":0,"character":3}},"text":" baz"}' +
+    ']}}',
+    Doc));
+  Assert.AreEqual('bar baz', Doc.Text);
+end;
+
+procedure TLspMessageTests.TryApplyDidChange_BumpsVersion;
+var
+  Doc: TOpenDocument;
+begin
+  Doc.Version := 5;
+  Doc.Text := '';
+  Assert.IsTrue(TryApplyDidChange(
+    '{"params":{"textDocument":{"uri":"file:///x.pas","version":42},' +
+    '"contentChanges":[]}}',
+    Doc));
+  Assert.IsTrue(Doc.Version = 42, 'version should follow the message');
+end;
+
+procedure TLspMessageTests.TryApplyDidChange_NoVersionField_PreservesVersion;
+var
+  Doc: TOpenDocument;
+begin
+  Doc.Version := 7;
+  Doc.Text := 'before';
+  Assert.IsTrue(TryApplyDidChange(
+    '{"params":{"textDocument":{"uri":"file:///x.pas"},' +
+    '"contentChanges":[{"text":"after"}]}}',
+    Doc));
+  Assert.IsTrue(Doc.Version = 7, 'no version field -> version unchanged');
+  Assert.AreEqual('after', Doc.Text);
+end;
+
+procedure TLspMessageTests.TryApplyDidChange_NoUri_LeavesDocUntouched;
+var
+  Doc: TOpenDocument;
+begin
+  Doc.Version := 1;
+  Doc.Text := 'untouched';
+  Assert.IsFalse(TryApplyDidChange(
+    '{"params":{"textDocument":{"version":2},' +
+    '"contentChanges":[{"text":"would-replace"}]}}',
+    Doc));
+  Assert.AreEqual('untouched', Doc.Text);
+  Assert.IsTrue(Doc.Version = 1);
+end;
+
+procedure TLspMessageTests.TryApplyDidChange_EmptyChangesArray_Succeeds;
+var
+  Doc: TOpenDocument;
+begin
+  // didChange with no actual edits is rare but valid (e.g. version-only
+  // bump). Should succeed and leave Text untouched.
+  Doc.Version := 1;
+  Doc.Text := 'unchanged';
+  Assert.IsTrue(TryApplyDidChange(
+    '{"params":{"textDocument":{"uri":"file:///x.pas","version":2},' +
+    '"contentChanges":[]}}',
+    Doc));
+  Assert.AreEqual('unchanged', Doc.Text);
+  Assert.IsTrue(Doc.Version = 2);
 end;
 
 initialization
