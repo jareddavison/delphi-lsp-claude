@@ -652,94 +652,83 @@ end;
 
 procedure InitSessionState;
 var
-  Base, FromArg, FromScan, ClaudePidDir: string;
+  Base, ClaudePidDir, FromEnv, FromArgv, FromAncestor: string;
+  FromByIdScan, FromProjectsDir: string;
+  AncestorPidThatWon: DWORD;
   Ancestors: TArray<DWORD>;
   AncIdx: Integer;
   AncId: DWORD;
+  Resolution: TSessionIdResolution;
 begin
   DumpClaudeEnv;
   DumpArgv;
   DumpProcessIdentity;
-  GClaudeSessionId := GetEnv('CLAUDE_CODE_SESSION_ID', '');
-  // Reject unsubstituted manifest placeholders — Claude Code 2.1.x doesn't
-  // expand ${CLAUDE_CODE_SESSION_ID} in lspServers.<n>.env (only the
-  // ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA}/${user_config.*} whitelist
-  // substitutes; arbitrary env vars pass through literally). Without this
-  // guard the shim would accept the literal placeholder as a session id
-  // and write sticky to a bogus filename.
-  if (GClaudeSessionId <> '') and
-     ((Pos('${', GClaudeSessionId) > 0) or
-      SameText(GClaudeSessionId, '${CLAUDE_CODE_SESSION_ID}')) then
-  begin
+
+  FromEnv := FilterUnsubstitutedPlaceholder(GetEnv('CLAUDE_CODE_SESSION_ID', ''));
+  if (FromEnv = '') and (GetEnv('CLAUDE_CODE_SESSION_ID', '') <> '') then
     Diag('env CLAUDE_CODE_SESSION_ID is unsubstituted placeholder; ignoring');
-    GClaudeSessionId := '';
-  end;
-  if GClaudeSessionId <> '' then
-    Diag('Claude session id from env: ' + GClaudeSessionId)
-  else
+
+  FromArgv := ParseSessionIdFromArgv;
+
+  // Walk the shim's process ancestry looking for any hook drop file keyed
+  // by an ancestor PID. The hook writes one file per ancestor; we walk
+  // ours from the bottom up. They share Claude Code's main process (or
+  // higher) as a common ancestor — race-free per Claude Code instance,
+  // even with multiple simultaneous sessions in the same workspace.
+  ClaudePidDir := IncludeTrailingPathDelimiter(ResolvePluginDataBase) + 'claude-pid';
+  FromAncestor := '';
+  AncestorPidThatWon := 0;
+  if (FromEnv = '') and (FromArgv = '') then
   begin
-    FromArg := ParseSessionIdFromArgv;
-    if FromArg <> '' then
+    Ancestors := GetAncestorPids(GetCurrentProcessId);
+    Diag(Format('Walking %d ancestor(s) for hook drop file', [Length(Ancestors)]));
+    for AncIdx := 0 to High(Ancestors) do
     begin
-      GClaudeSessionId := FromArg;
-      Diag('Claude session id from argv: ' + GClaudeSessionId);
-    end
-    else
-    begin
-      // Resolve <plugin-data>/claude-pid once; the resolvers operate against it.
-      ClaudePidDir := IncludeTrailingPathDelimiter(ResolvePluginDataBase) + 'claude-pid';
-
-      // Walk the shim's process ancestry looking for any hook drop file
-      // keyed by an ancestor PID. The hook writes one file per ancestor;
-      // we walk ours from the bottom up. They share Claude Code's main
-      // process (or higher) as a common ancestor — race-free per Claude
-      // Code instance, even with multiple simultaneous sessions in the
-      // same workspace.
-      Ancestors := GetAncestorPids(GetCurrentProcessId);
-      Diag(Format('Walking %d ancestor(s) for hook drop file', [Length(Ancestors)]));
-      for AncIdx := 0 to High(Ancestors) do
+      AncId := Ancestors[AncIdx];
+      Diag(Format('  ancestor[%d]=%d', [AncIdx, AncId]));
+      FromAncestor := ReadSessionIdFromHookFile(ClaudePidDir, IntToStr(AncId));
+      if FromAncestor <> '' then
       begin
-        AncId := Ancestors[AncIdx];
-        Diag(Format('  ancestor[%d]=%d', [AncIdx, AncId]));
-        FromScan := ReadSessionIdFromHookFile(ClaudePidDir, IntToStr(AncId));
-        if FromScan <> '' then
-        begin
-          GClaudeSessionId := FromScan;
-          Diag(Format('Claude session id from hook file (ancestor pid=%d): %s',
-            [AncId, GClaudeSessionId]));
-          Break;
-        end;
-      end;
-
-      if GClaudeSessionId = '' then
-      begin
-        // Fallback: by-id-*.json scan + cwd canonical match. Used to be
-        // the primary on Windows when hook PPID was wrong; now a backstop.
-        FromScan := ResolveSessionIdViaHookFiles(ClaudePidDir, GetCurrentDir);
-        if FromScan <> '' then
-        begin
-          GClaudeSessionId := FromScan;
-          Diag('Claude session id from hook by-id scan: ' + GClaudeSessionId);
-        end;
-      end;
-
-      if GClaudeSessionId = '' then
-      begin
-        // Last resort: most-recent .jsonl mtime in projects dir. Race window
-        // for simultaneous same-cwd sessions.
-        FromScan := DiscoverSessionIdFromProjectsDir(ResolveProjectsRoot, GetCurrentDir);
-        if FromScan <> '' then
-        begin
-          GClaudeSessionId := FromScan;
-          Diag('Claude session id from projects-dir scan: ' + GClaudeSessionId);
-        end;
+        AncestorPidThatWon := AncId;
+        Break;
       end;
     end;
   end;
-  if GClaudeSessionId = '' then
+
+  // Fallback chain: by-id scan and projects-dir scan. Computed only if
+  // earlier tiers didn't resolve, mirroring the pre-extraction behaviour
+  // of bailing out as soon as a value was found.
+  FromByIdScan := '';
+  FromProjectsDir := '';
+  if (FromEnv = '') and (FromArgv = '') and (FromAncestor = '') then
   begin
-    Diag('Claude session id unresolvable (env/argv/hook/scan all failed); cross-session sticky disabled');
-    Exit;
+    FromByIdScan := ResolveSessionIdViaHookFiles(ClaudePidDir, GetCurrentDir);
+    if FromByIdScan = '' then
+      FromProjectsDir := DiscoverSessionIdFromProjectsDir(
+        ResolveProjectsRoot, GetCurrentDir);
+  end;
+
+  Resolution := ResolveSessionId(
+    FromEnv, FromArgv, FromAncestor, FromByIdScan, FromProjectsDir);
+  GClaudeSessionId := Resolution.SessionId;
+
+  case Resolution.Source of
+    ssEnv:
+      Diag('Claude session id from env: ' + GClaudeSessionId);
+    ssArgv:
+      Diag('Claude session id from argv: ' + GClaudeSessionId);
+    ssHookAncestor:
+      Diag(Format('Claude session id from hook file (ancestor pid=%d): %s',
+        [AncestorPidThatWon, GClaudeSessionId]));
+    ssHookByIdScan:
+      Diag('Claude session id from hook by-id scan: ' + GClaudeSessionId);
+    ssProjectsDirScan:
+      Diag('Claude session id from projects-dir scan: ' + GClaudeSessionId);
+    ssNone:
+    begin
+      Diag('Claude session id unresolvable (env/argv/hook/scan all failed); cross-session sticky disabled');
+      Exit;
+    end;
   end;
   Base := ResolvePluginDataBase;
   if Base = '' then

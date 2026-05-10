@@ -25,6 +25,45 @@ unit DelphiLsp.SessionIdResolver;
 
 interface
 
+type
+  TSessionIdSource = (
+    ssNone,             // nothing resolved
+    ssEnv,              // CLAUDE_CODE_SESSION_ID env var
+    ssArgv,             // --claude-session-id=<id>
+    ssHookAncestor,     // claude-pid/<ancestor-pid>.json
+    ssHookByIdScan,     // claude-pid/by-id-*.json + cwd canonical match
+    ssProjectsDirScan); // most-recent .jsonl in <projects>/<encoded-cwd>
+
+  TSessionIdResolution = record
+    SessionId: string;
+    Source: TSessionIdSource;
+  end;
+
+// Strip a candidate session id of any unsubstituted manifest placeholder.
+// Returns '' if Value is the literal `${CLAUDE_CODE_SESSION_ID}`, contains
+// any embedded `${`, or is already empty. Otherwise returns Value
+// unchanged.
+//
+// Background: Claude Code 2.1.x only substitutes the
+// CLAUDE_PLUGIN_ROOT/CLAUDE_PLUGIN_DATA/user_config.* whitelist in
+// lspServers.<n>.{args,env}. Arbitrary env names (incl. CLAUDE_CODE_SESSION_ID)
+// pass through literally. Without this guard the shim accepts the literal
+// placeholder as a session id and writes sticky to a bogus filename.
+function FilterUnsubstitutedPlaceholder(const Value: string): string;
+
+// Pure decision function — picks the highest-priority non-empty input
+// across the discovery sources. Caller has done the I/O for each source
+// and passes pre-resolved results. Result.Source identifies which won.
+//
+// Precedence (top wins):
+//   1. FromEnv  (already filtered for placeholders)
+//   2. FromArgv (already filtered for placeholders by ParseSessionIdFromArgv)
+//   3. FromAncestor — first non-empty hit when caller walked ancestry
+//   4. FromByIdScan
+//   5. FromProjectsDirScan
+function ResolveSessionId(const FromEnv, FromArgv, FromAncestor,
+  FromByIdScan, FromProjectsDirScan: string): TSessionIdResolution;
+
 // Look for `--claude-session-id=<id>` in argv. Returns '' if absent or if
 // the value still contains an unsubstituted ${...} placeholder. Reads
 // ParamStr/ParamCount directly — caller doesn't pass argv.
@@ -59,6 +98,52 @@ uses
   System.JSON,
   DelphiLsp.Logging,
   DelphiLsp.Paths;
+
+function FilterUnsubstitutedPlaceholder(const Value: string): string;
+begin
+  Result := Value;
+  if Result = '' then Exit;
+  if (Pos('${', Result) > 0) or
+     (Result = '${CLAUDE_CODE_SESSION_ID}') then
+    Result := '';
+end;
+
+function ResolveSessionId(const FromEnv, FromArgv, FromAncestor,
+  FromByIdScan, FromProjectsDirScan: string): TSessionIdResolution;
+begin
+  if FromEnv <> '' then
+  begin
+    Result.SessionId := FromEnv;
+    Result.Source := ssEnv;
+    Exit;
+  end;
+  if FromArgv <> '' then
+  begin
+    Result.SessionId := FromArgv;
+    Result.Source := ssArgv;
+    Exit;
+  end;
+  if FromAncestor <> '' then
+  begin
+    Result.SessionId := FromAncestor;
+    Result.Source := ssHookAncestor;
+    Exit;
+  end;
+  if FromByIdScan <> '' then
+  begin
+    Result.SessionId := FromByIdScan;
+    Result.Source := ssHookByIdScan;
+    Exit;
+  end;
+  if FromProjectsDirScan <> '' then
+  begin
+    Result.SessionId := FromProjectsDirScan;
+    Result.Source := ssProjectsDirScan;
+    Exit;
+  end;
+  Result.SessionId := '';
+  Result.Source := ssNone;
+end;
 
 function ParseSessionIdFromArgv: string;
 const

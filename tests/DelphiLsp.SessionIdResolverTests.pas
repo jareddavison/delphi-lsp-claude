@@ -47,6 +47,25 @@ type
     [Test] procedure DiscoverFromProjects_ReturnsEmpty_WhenNoEncodedDir;
     [Test] procedure DiscoverFromProjects_ReturnsEmpty_WhenNoJsonl;
     [Test] procedure DiscoverFromProjects_EncodesCwdCorrectly;
+
+    // FilterUnsubstitutedPlaceholder
+    [Test] procedure Filter_EmptyInput_ReturnsEmpty;
+    [Test] procedure Filter_ExactPlaceholder_ReturnsEmpty;
+    [Test] procedure Filter_EmbeddedPlaceholder_ReturnsEmpty;
+    [Test] procedure Filter_OtherPlaceholderName_StillStripped;
+    [Test] procedure Filter_RealUuid_PassesThrough;
+
+    // ResolveSessionId precedence cascade
+    [Test] procedure Resolve_AllEmpty_IsNone;
+    [Test] procedure Resolve_OnlyEnv_IsEnv;
+    [Test] procedure Resolve_OnlyArgv_IsArgv;
+    [Test] procedure Resolve_OnlyAncestor_IsHookAncestor;
+    [Test] procedure Resolve_OnlyByIdScan_IsByIdScan;
+    [Test] procedure Resolve_OnlyProjectsDir_IsProjectsDirScan;
+    [Test] procedure Resolve_EnvBeatsArgv;
+    [Test] procedure Resolve_ArgvBeatsAncestor;
+    [Test] procedure Resolve_AncestorBeatsByIdScan;
+    [Test] procedure Resolve_ByIdScanBeatsProjectsDir;
   end;
 
 implementation
@@ -234,6 +253,132 @@ begin
   WriteJson('projects\' + Encoded + '\correct-session.jsonl', '');
   Assert.AreEqual('correct-session',
     DiscoverSessionIdFromProjectsDir(FProjectsRoot, 'D:\Documents\TestDproj'));
+end;
+
+{ FilterUnsubstitutedPlaceholder }
+
+procedure TSessionIdResolverTests.Filter_EmptyInput_ReturnsEmpty;
+begin
+  Assert.AreEqual('', FilterUnsubstitutedPlaceholder(''));
+end;
+
+procedure TSessionIdResolverTests.Filter_ExactPlaceholder_ReturnsEmpty;
+begin
+  Assert.AreEqual('',
+    FilterUnsubstitutedPlaceholder('${CLAUDE_CODE_SESSION_ID}'));
+end;
+
+procedure TSessionIdResolverTests.Filter_EmbeddedPlaceholder_ReturnsEmpty;
+begin
+  // Defensive: if a value somehow has the substitution syntax embedded,
+  // treat it as not-real.
+  Assert.AreEqual('', FilterUnsubstitutedPlaceholder('prefix-${UNRESOLVED}-suffix'));
+end;
+
+procedure TSessionIdResolverTests.Filter_OtherPlaceholderName_StillStripped;
+begin
+  // The filter rejects any ${...}, not just the specific session id name —
+  // catches mis-spelled or future variable names that didn't substitute.
+  Assert.AreEqual('', FilterUnsubstitutedPlaceholder('${NOT_THE_SAME_VAR}'));
+end;
+
+procedure TSessionIdResolverTests.Filter_RealUuid_PassesThrough;
+const
+  Uuid = '365fd6b8-f0ce-42ba-8484-157fe6a99246';
+begin
+  Assert.AreEqual(Uuid, FilterUnsubstitutedPlaceholder(Uuid));
+end;
+
+{ ResolveSessionId precedence cascade }
+
+procedure TSessionIdResolverTests.Resolve_AllEmpty_IsNone;
+var
+  R: TSessionIdResolution;
+begin
+  R := ResolveSessionId('', '', '', '', '');
+  Assert.AreEqual('', R.SessionId);
+  Assert.IsTrue(R.Source = ssNone);
+end;
+
+procedure TSessionIdResolverTests.Resolve_OnlyEnv_IsEnv;
+var
+  R: TSessionIdResolution;
+begin
+  R := ResolveSessionId('env-id', '', '', '', '');
+  Assert.AreEqual('env-id', R.SessionId);
+  Assert.IsTrue(R.Source = ssEnv);
+end;
+
+procedure TSessionIdResolverTests.Resolve_OnlyArgv_IsArgv;
+var
+  R: TSessionIdResolution;
+begin
+  R := ResolveSessionId('', 'argv-id', '', '', '');
+  Assert.AreEqual('argv-id', R.SessionId);
+  Assert.IsTrue(R.Source = ssArgv);
+end;
+
+procedure TSessionIdResolverTests.Resolve_OnlyAncestor_IsHookAncestor;
+var
+  R: TSessionIdResolution;
+begin
+  R := ResolveSessionId('', '', 'anc-id', '', '');
+  Assert.AreEqual('anc-id', R.SessionId);
+  Assert.IsTrue(R.Source = ssHookAncestor);
+end;
+
+procedure TSessionIdResolverTests.Resolve_OnlyByIdScan_IsByIdScan;
+var
+  R: TSessionIdResolution;
+begin
+  R := ResolveSessionId('', '', '', 'byid-id', '');
+  Assert.AreEqual('byid-id', R.SessionId);
+  Assert.IsTrue(R.Source = ssHookByIdScan);
+end;
+
+procedure TSessionIdResolverTests.Resolve_OnlyProjectsDir_IsProjectsDirScan;
+var
+  R: TSessionIdResolution;
+begin
+  R := ResolveSessionId('', '', '', '', 'pd-id');
+  Assert.AreEqual('pd-id', R.SessionId);
+  Assert.IsTrue(R.Source = ssProjectsDirScan);
+end;
+
+procedure TSessionIdResolverTests.Resolve_EnvBeatsArgv;
+var
+  R: TSessionIdResolution;
+begin
+  R := ResolveSessionId('env', 'argv', 'anc', 'byid', 'pd');
+  Assert.AreEqual('env', R.SessionId);
+  Assert.IsTrue(R.Source = ssEnv);
+end;
+
+procedure TSessionIdResolverTests.Resolve_ArgvBeatsAncestor;
+var
+  R: TSessionIdResolution;
+begin
+  R := ResolveSessionId('', 'argv', 'anc', 'byid', 'pd');
+  Assert.AreEqual('argv', R.SessionId);
+  Assert.IsTrue(R.Source = ssArgv);
+end;
+
+procedure TSessionIdResolverTests.Resolve_AncestorBeatsByIdScan;
+var
+  R: TSessionIdResolution;
+begin
+  R := ResolveSessionId('', '', 'anc', 'byid', 'pd');
+  Assert.AreEqual('anc', R.SessionId);
+  Assert.IsTrue(R.Source = ssHookAncestor);
+end;
+
+procedure TSessionIdResolverTests.Resolve_ByIdScanBeatsProjectsDir;
+var
+  R: TSessionIdResolution;
+begin
+  R := ResolveSessionId('', '', '', 'byid', 'pd');
+  Assert.AreEqual('byid', R.SessionId);
+  Assert.IsTrue(R.Source = ssHookByIdScan);
 end;
 
 initialization
