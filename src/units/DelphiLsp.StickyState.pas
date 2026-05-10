@@ -21,6 +21,14 @@ interface
 // single non-empty check before reading/writing.
 function BuildStickyStatePath(const PluginDataBase, SessionId: string): string;
 
+// Hash a working-directory path into the canonical sticky-entry key.
+// NormalizeCwd canonicalizes (strips trailing path delimiter,
+// case-folds), then SHA256 hex gives a fixed-length filesystem-safe
+// JSON-key string. Two cwd values that differ only in trailing slash
+// or case produce the same hash, so /delphi-project lookups are
+// stable across the canonicalized variants.
+function ComputeCwdHash(const Cwd: string): string;
+
 // Read the sticky pick for the given cwd from StatePath. Returns the
 // absolute .delphilsp.json path if a valid entry exists AND the file still
 // exists on disk; '' otherwise. Returns '' if StatePath is empty or doesn't
@@ -54,6 +62,11 @@ begin
             SessionId + '.json';
 end;
 
+function ComputeCwdHash(const Cwd: string): string;
+begin
+  Result := THashSHA2.GetHashString(NormalizeCwd(Cwd), SHA256);
+end;
+
 function ReadStickyForCwd(const StatePath, Cwd: string): string;
 var
   Content, CwdHash, Path: string;
@@ -63,7 +76,7 @@ var
 begin
   Result := '';
   if not TryReadAllText(StatePath, 'Sticky read failed', Content) then Exit;
-  CwdHash := THashSHA2.GetHashString(NormalizeCwd(Cwd), SHA256);
+  CwdHash := ComputeCwdHash(Cwd);
   Root := TryParseJsonObject(Content);
   if Root = nil then Exit;
   try
@@ -92,7 +105,7 @@ var
   FS: TFileStream;
 begin
   if (StatePath = '') or (Cwd = '') or (SettingsPath = '') then Exit;
-  CwdHash := THashSHA2.GetHashString(NormalizeCwd(Cwd), SHA256);
+  CwdHash := ComputeCwdHash(Cwd);
 
   Root := nil;
   try

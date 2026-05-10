@@ -276,7 +276,7 @@ begin
 
   // Multi-candidate prompt: only if no sticky AND >1 .delphilsp.json files.
   StickyFile := BuildStickyStatePath(Base, SessionId);
-  CwdHash := THashSHA2.GetHashString(NormalizeCwd(Cwd), SHA256);
+  CwdHash := ComputeCwdHash(Cwd);
   HasSticky := False;
   if TryReadAllText(StickyFile, 'Hook sticky-check failed', Content) then
     HasSticky := Pos('"' + CwdHash + '"', Content) > 0;

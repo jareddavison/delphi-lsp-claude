@@ -49,6 +49,12 @@ type
     [Test] procedure BuildPath_EmptySessionId_ReturnsEmpty;
     [Test] procedure BuildPath_BaseWithoutTrailingSlash_StillCorrect;
     [Test] procedure BuildPath_BaseWithTrailingSlash_NoDoubleSeparator;
+
+    // ComputeCwdHash
+    [Test] procedure CwdHash_StableForSameInput;
+    [Test] procedure CwdHash_DifferentInputsDifferentHash;
+    [Test] procedure CwdHash_TrailingSlashIgnored;
+    [Test] procedure CwdHash_ReturnsHexString;
   end;
 
 implementation
@@ -254,6 +260,58 @@ begin
   Assert.AreEqual(
     'D:\Data\session-state\sid.json',
     BuildStickyStatePath('D:\Data\', 'sid'));
+end;
+
+{ ComputeCwdHash }
+
+procedure TStickyStateTests.CwdHash_StableForSameInput;
+begin
+  // Determinism: identical input must always produce the identical
+  // hex digest. Sticky lookups depend on this — a HookEntry-side
+  // hash and a StickyState-side hash for the same cwd must match.
+  Assert.AreEqual(
+    ComputeCwdHash('D:\Documents\TestDproj'),
+    ComputeCwdHash('D:\Documents\TestDproj'));
+end;
+
+procedure TStickyStateTests.CwdHash_DifferentInputsDifferentHash;
+begin
+  Assert.IsTrue(
+    ComputeCwdHash('D:\First') <> ComputeCwdHash('D:\Second'),
+    'distinct cwd values must hash to distinct strings');
+end;
+
+procedure TStickyStateTests.CwdHash_TrailingSlashIgnored;
+begin
+  // NormalizeCwd canonicalizes trailing-slash variants, so the hash
+  // is the same whichever form the caller hands in. Important for
+  // round-trips between the hook (writes one form) and the shim
+  // (reads another form).
+  Assert.AreEqual(
+    ComputeCwdHash('D:\Documents\TestDproj'),
+    ComputeCwdHash('D:\Documents\TestDproj\'),
+    'trailing-slash form must canonicalize to the same hash');
+end;
+
+procedure TStickyStateTests.CwdHash_ReturnsHexString;
+var
+  H: string;
+  I: Integer;
+  Ch: Char;
+begin
+  // SHA-256 hex string: 64 chars, all 0-9 / a-f / A-F.
+  H := ComputeCwdHash('D:\Cwd');
+  Assert.IsTrue(Length(H) = 64,
+    Format('expected 64-char hex; got %d', [Length(H)]));
+  for I := 1 to Length(H) do
+  begin
+    Ch := H[I];
+    Assert.IsTrue(
+      ((Ch >= '0') and (Ch <= '9')) or
+      ((Ch >= 'a') and (Ch <= 'f')) or
+      ((Ch >= 'A') and (Ch <= 'F')),
+      Format('non-hex char at position %d: %s', [I, Ch]));
+  end;
 end;
 
 initialization
