@@ -215,7 +215,7 @@ end;
 
 procedure InitSessionState;
 var
-  Base, ClaudePidDir, FromEnv, FromArgv, FromAncestor: string;
+  Base, PidDir, FromEnv, FromArgv, FromAncestor: string;
   FromByIdScan, FromProjectsDir: string;
   AncestorPidThatWon: DWORD;
   Ancestors: TArray<DWORD>;
@@ -238,7 +238,7 @@ begin
   // ours from the bottom up. They share Claude Code's main process (or
   // higher) as a common ancestor — race-free per Claude Code instance,
   // even with multiple simultaneous sessions in the same workspace.
-  ClaudePidDir := IncludeTrailingPathDelimiter(ResolvePluginDataBase) + 'claude-pid';
+  PidDir := ClaudePidDir(ResolvePluginDataBase);
   FromAncestor := '';
   AncestorPidThatWon := 0;
   if (FromEnv = '') and (FromArgv = '') then
@@ -249,7 +249,7 @@ begin
     begin
       AncId := Ancestors[AncIdx];
       Diag(Format('  ancestor[%d]=%d', [AncIdx, AncId]));
-      FromAncestor := ReadSessionIdFromHookFile(ClaudePidDir, IntToStr(AncId));
+      FromAncestor := ReadSessionIdFromHookFile(PidDir, IntToStr(AncId));
       if FromAncestor <> '' then
       begin
         AncestorPidThatWon := AncId;
@@ -265,7 +265,7 @@ begin
   FromProjectsDir := '';
   if (FromEnv = '') and (FromArgv = '') and (FromAncestor = '') then
   begin
-    FromByIdScan := ResolveSessionIdViaHookFiles(ClaudePidDir, GetCurrentDir);
+    FromByIdScan := ResolveSessionIdViaHookFiles(PidDir, GetCurrentDir);
     if FromByIdScan = '' then
       FromProjectsDir := DiscoverSessionIdFromProjectsDir(
         ResolveProjectsRoot, GetCurrentDir);
@@ -503,11 +503,11 @@ begin
     if (GClaudeSessionId <> '') and IsClaudeSessionAlive(ResolveProjectsRoot, GClaudeSessionId) then
     begin
       GcStaleSessionState(
-        IncludeTrailingPathDelimiter(ResolvePluginDataBase) + 'session-state',
+        SessionStateDir(ResolvePluginDataBase),
         ResolveProjectsRoot,
         GClaudeSessionId);
       GcStaleClaudePidFiles(
-        IncludeTrailingPathDelimiter(ResolvePluginDataBase) + 'claude-pid',
+        ClaudePidDir(ResolvePluginDataBase),
         ResolveProjectsRoot);
     end
     else

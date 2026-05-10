@@ -114,7 +114,7 @@ begin
     Diag('No usable data dir; running without per-session sentinel');
     Exit;
   end;
-  SessionsRoot := IncludeTrailingPathDelimiter(Base) + 'sessions';
+  SessionsRoot := SessionsDir(Base);
   GcOrphanSessions(SessionsRoot, GetCurrentProcessId);
   Result := RegisterSessionAt(SessionsRoot, GetCurrentProcessId,
                               GetCurrentDir);

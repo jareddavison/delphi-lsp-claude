@@ -46,6 +46,19 @@ function ResolveProjectsRoot: string;
 // or missing root.
 function IsClaudeSessionAlive(const ProjectsRoot, SessionId: string): Boolean;
 
+// Conventional layout helpers. Each takes a plugin-data base (typically
+// the result of ResolvePluginDataBase) and returns the path to the
+// corresponding sub-directory. Empty input passes through unchanged so
+// the result is always either a real path or ''.
+//
+//   <Base>/claude-pid    — hook drop files (session correlation)
+//   <Base>/session-state — per-Claude-session sticky bindings
+//   <Base>/sessions      — per-shim-process state dirs
+
+function ClaudePidDir(const PluginDataBase: string): string;
+function SessionStateDir(const PluginDataBase: string): string;
+function SessionsDir(const PluginDataBase: string): string;
+
 implementation
 
 uses
@@ -81,6 +94,24 @@ begin
   end;
   Result := IncludeTrailingPathDelimiter(GetEnv('USERPROFILE', '')) +
             '.claude' + PathDelim + 'projects';
+end;
+
+function ClaudePidDir(const PluginDataBase: string): string;
+begin
+  if PluginDataBase = '' then Exit('');
+  Result := IncludeTrailingPathDelimiter(PluginDataBase) + 'claude-pid';
+end;
+
+function SessionStateDir(const PluginDataBase: string): string;
+begin
+  if PluginDataBase = '' then Exit('');
+  Result := IncludeTrailingPathDelimiter(PluginDataBase) + 'session-state';
+end;
+
+function SessionsDir(const PluginDataBase: string): string;
+begin
+  if PluginDataBase = '' then Exit('');
+  Result := IncludeTrailingPathDelimiter(PluginDataBase) + 'sessions';
 end;
 
 function IsClaudeSessionAlive(const ProjectsRoot, SessionId: string): Boolean;

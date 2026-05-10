@@ -35,6 +35,15 @@ type
     [Test] procedure IsClaudeSessionAlive_ReturnsFalseForBlankRoot;
     [Test] procedure IsClaudeSessionAlive_ReturnsFalseForMissingRoot;
     [Test] procedure IsClaudeSessionAlive_FindsAcrossMultipleSubdirs;
+
+    // Subdir helpers
+    [Test] procedure ClaudePidDir_AppendsSubdir;
+    [Test] procedure ClaudePidDir_EmptyBase_ReturnsEmpty;
+    [Test] procedure SessionStateDir_AppendsSubdir;
+    [Test] procedure SessionStateDir_EmptyBase_ReturnsEmpty;
+    [Test] procedure SessionsDir_AppendsSubdir;
+    [Test] procedure SessionsDir_EmptyBase_ReturnsEmpty;
+    [Test] procedure SubdirHelpers_HandleTrailingSlash;
   end;
 
 implementation
@@ -133,6 +142,52 @@ begin
   WriteJsonl('D--Fourth-Cwd\unrelated-3.jsonl');
   Assert.IsTrue(IsClaudeSessionAlive(FRoot, SessionId),
     'must find the .jsonl regardless of which subdir holds it');
+end;
+
+{ Subdir helpers }
+
+procedure TPluginDataTests.ClaudePidDir_AppendsSubdir;
+begin
+  Assert.AreEqual('C:\PluginData\claude-pid',
+    ClaudePidDir('C:\PluginData'));
+end;
+
+procedure TPluginDataTests.ClaudePidDir_EmptyBase_ReturnsEmpty;
+begin
+  Assert.AreEqual('', ClaudePidDir(''));
+end;
+
+procedure TPluginDataTests.SessionStateDir_AppendsSubdir;
+begin
+  Assert.AreEqual('D:\Data\session-state',
+    SessionStateDir('D:\Data'));
+end;
+
+procedure TPluginDataTests.SessionStateDir_EmptyBase_ReturnsEmpty;
+begin
+  Assert.AreEqual('', SessionStateDir(''));
+end;
+
+procedure TPluginDataTests.SessionsDir_AppendsSubdir;
+begin
+  Assert.AreEqual('D:\Data\sessions', SessionsDir('D:\Data'));
+end;
+
+procedure TPluginDataTests.SessionsDir_EmptyBase_ReturnsEmpty;
+begin
+  Assert.AreEqual('', SessionsDir(''));
+end;
+
+procedure TPluginDataTests.SubdirHelpers_HandleTrailingSlash;
+begin
+  // IncludeTrailingPathDelimiter is idempotent — base ending in '\'
+  // must not produce '\\'.
+  Assert.AreEqual('C:\PluginData\claude-pid',
+    ClaudePidDir('C:\PluginData\'));
+  Assert.AreEqual('C:\PluginData\session-state',
+    SessionStateDir('C:\PluginData\'));
+  Assert.AreEqual('C:\PluginData\sessions',
+    SessionsDir('C:\PluginData\'));
 end;
 
 initialization

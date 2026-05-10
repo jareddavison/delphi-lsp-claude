@@ -44,13 +44,14 @@ uses
   DelphiLsp.Paths,
   DelphiLsp.Logging,
   DelphiLsp.JsonUtils,
-  DelphiLsp.IO;
+  DelphiLsp.IO,
+  DelphiLsp.PluginData;
 
 function BuildStickyStatePath(const PluginDataBase, SessionId: string): string;
 begin
   if (PluginDataBase = '') or (SessionId = '') then Exit('');
-  Result := IncludeTrailingPathDelimiter(PluginDataBase) + 'session-state' +
-            PathDelim + SessionId + '.json';
+  Result := IncludeTrailingPathDelimiter(SessionStateDir(PluginDataBase)) +
+            SessionId + '.json';
 end;
 
 function ReadStickyForCwd(const StatePath, Cwd: string): string;

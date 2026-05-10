@@ -189,7 +189,7 @@ procedure RunSessionStartHook;
 var
   PayloadBytes: TBytes;
   Payload, SessionId, Cwd, EntryJson: string;
-  Base, ClaudePidDir, PpidPath, ByIdPath: string;
+  Base, PidDir, PpidPath, ByIdPath: string;
   StickyFile, Content, CwdHash: string;
   Ppid: DWORD;
   HasSticky, Parsed: Boolean;
@@ -224,9 +224,9 @@ begin
     Exit;
   end;
 
-  ClaudePidDir := IncludeTrailingPathDelimiter(Base) + 'claude-pid';
+  PidDir := ClaudePidDir(Base);
   try
-    ForceDirectories(ClaudePidDir);
+    ForceDirectories(PidDir);
   except
     on E: Exception do
     begin
@@ -258,14 +258,14 @@ begin
   Ancestors := GetAncestorPids(GetCurrentProcessId);
   for I := 0 to High(Ancestors) do
   begin
-    PpidPath := IncludeTrailingPathDelimiter(ClaudePidDir) +
+    PpidPath := IncludeTrailingPathDelimiter(PidDir) +
                 IntToStr(Ancestors[I]) + '.json';
     WriteFileAtomic(PpidPath, EntryJson);
   end;
 
   // Fallback: by-id-<session>.json keyed by session id. The shim's by-id+cwd
   // scan uses this if no ancestor file matches (shouldn't happen, defensive).
-  ByIdPath := IncludeTrailingPathDelimiter(ClaudePidDir) +
+  ByIdPath := IncludeTrailingPathDelimiter(PidDir) +
               'by-id-' + SessionId + '.json';
   WriteFileAtomic(ByIdPath, EntryJson);
 
@@ -345,7 +345,7 @@ procedure RunSessionEndHook;
 var
   PayloadBytes: TBytes;
   Payload, SessionId, Reason: string;
-  Base, ClaudePidDir, FullPath, FileSessionId, Content: string;
+  Base, PidDir, FullPath, FileSessionId, Content: string;
   Ancestors: TArray<DWORD>;
   AncIdx: Integer;
   Removed: Integer;
@@ -370,13 +370,13 @@ begin
 
   Base := ResolvePluginDataBase;
   if Base = '' then Exit;
-  ClaudePidDir := IncludeTrailingPathDelimiter(Base) + 'claude-pid';
-  if not DirectoryExists(ClaudePidDir) then Exit;
+  PidDir := ClaudePidDir(Base);
+  if not DirectoryExists(PidDir) then Exit;
 
   Removed := 0;
 
   // Delete the by-id drop file — keyed directly by our session.
-  FullPath := IncludeTrailingPathDelimiter(ClaudePidDir) + 'by-id-' + SessionId + '.json';
+  FullPath := IncludeTrailingPathDelimiter(PidDir) + 'by-id-' + SessionId + '.json';
   if FileExists(FullPath) then
   begin
     if DeleteFile(PChar(FullPath)) then Inc(Removed)
@@ -391,7 +391,7 @@ begin
   Ancestors := GetAncestorPids(GetCurrentProcessId);
   for AncIdx := 0 to High(Ancestors) do
   begin
-    FullPath := IncludeTrailingPathDelimiter(ClaudePidDir) +
+    FullPath := IncludeTrailingPathDelimiter(PidDir) +
                 IntToStr(Ancestors[AncIdx]) + '.json';
     if not TryReadAllText(FullPath, 'SessionEnd ancestor-file read failed',
                           Content) then Continue;
