@@ -63,7 +63,8 @@ uses
   DelphiLsp.XmlDecode,
   DelphiLsp.Walkers,
   DelphiLsp.Logging,
-  DelphiLsp.JsonUtils;
+  DelphiLsp.JsonUtils,
+  DelphiLsp.IO;
 
 function ExtractDccFlagValue(const DccOptions, Flag: string): string;
 var
@@ -88,12 +89,9 @@ var
   SettingsVal, OptsVal: TJSONValue;
 begin
   Result := '';
-  if not FileExists(DelphilspPath) then Exit;
-  try
-    Content := TFile.ReadAllText(DelphilspPath, TEncoding.UTF8);
-  except
-    Exit;
-  end;
+  // Silent on read failure — the .delphilsp.json may legitimately be
+  // missing (no IDE save) or transiently locked; nothing actionable.
+  if not TryReadAllText(DelphilspPath, '', Content) then Exit;
   Root := TryParseJsonObject(Content);
   if Root = nil then Exit;
   try
@@ -149,15 +147,9 @@ begin
     begin
       DprojPath := Dprojs[I];
       DprojDir := ExtractFilePath(DprojPath);
-      try
-        Content := TFile.ReadAllText(DprojPath, TEncoding.UTF8);
-      except
-        on E: Exception do
-        begin
-          Diag(Format('FindOwning: read failed for %s: %s', [DprojPath, E.Message]));
-          Continue;
-        end;
-      end;
+      if not TryReadAllText(DprojPath,
+                            'FindOwning: read failed for ' + DprojPath,
+                            Content) then Continue;
       Matches := TRegEx.Matches(Content, '<DCCReference\s+Include="([^"]+)"', [roIgnoreCase]);
       for M in Matches do
       begin

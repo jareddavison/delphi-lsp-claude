@@ -278,15 +278,8 @@ begin
   StickyFile := BuildStickyStatePath(Base, SessionId);
   CwdHash := THashSHA2.GetHashString(NormalizeCwd(Cwd), SHA256);
   HasSticky := False;
-  if FileExists(StickyFile) then
-  begin
-    try
-      Content := TFile.ReadAllText(StickyFile, TEncoding.UTF8);
-      if Pos('"' + CwdHash + '"', Content) > 0 then HasSticky := True;
-    except
-      on E: Exception do Diag('Hook sticky-check failed: ' + E.Message);
-    end;
-  end;
+  if TryReadAllText(StickyFile, 'Hook sticky-check failed', Content) then
+    HasSticky := Pos('"' + CwdHash + '"', Content) > 0;
 
   if HasSticky then
   begin
@@ -400,17 +393,9 @@ begin
   begin
     FullPath := IncludeTrailingPathDelimiter(ClaudePidDir) +
                 IntToStr(Ancestors[AncIdx]) + '.json';
-    if not FileExists(FullPath) then Continue;
+    if not TryReadAllText(FullPath, 'SessionEnd ancestor-file read failed',
+                          Content) then Continue;
     FileSessionId := '';
-    try
-      Content := TFile.ReadAllText(FullPath, TEncoding.UTF8);
-    except
-      on E: Exception do
-      begin
-        Diag('SessionEnd ancestor-file read failed: ' + E.Message);
-        Continue;
-      end;
-    end;
     Obj := TryParseJsonObject(Content);
     if Obj <> nil then
     try

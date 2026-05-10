@@ -63,6 +63,7 @@ uses
   System.RegularExpressions,
   System.Win.Registry,
   DelphiLsp.Env,
+  DelphiLsp.IO,
   DelphiLsp.Logging;
 
 function FindDelphiLspExeUnder(const BdsRoot: string): string;
@@ -204,16 +205,8 @@ var
   Match: TMatch;
 begin
   Result := '';
-  if (Path = '') or (not FileExists(Path)) then Exit;
-  try
-    Content := TFile.ReadAllText(Path, TEncoding.UTF8);
-  except
-    on E: Exception do
-    begin
-      Diag('ExtractBdsVersionFromSettings read failed: ' + E.Message);
-      Exit;
-    end;
-  end;
+  if not TryReadAllText(Path, 'ExtractBdsVersionFromSettings read failed',
+                        Content) then Exit;
   Match := TRegEx.Match(Content, '(?i)(?:studio|bds)[/\\]+(\d+\.\d+)');
   if Match.Success then
     Result := Match.Groups[1].Value;

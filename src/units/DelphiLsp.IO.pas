@@ -31,11 +31,27 @@ function ReadAllStdin: TBytes;
 // matching the dpr's earlier behavior).
 procedure WriteFileAtomic(const Path, Content: string);
 
+// Read the entire file at Path as UTF-8 text. Returns True iff Path is
+// non-empty, the file exists, and the read succeeded. On read errors,
+// Diags '<DiagLabel>: <error-message>' (skipped if DiagLabel is '').
+// Missing-file is silent regardless. Out param Content is '' when the
+// result is False.
+//
+// Replaces the recurring pattern:
+//   try
+//     Content := TFile.ReadAllText(Path, TEncoding.UTF8);
+//   except
+//     on E: Exception do begin Diag('label: ' + E.Message); Exit; end;
+//   end;
+function TryReadAllText(const Path, DiagLabel: string;
+  out Content: string): Boolean;
+
 implementation
 
 uses
   Winapi.Windows,
   System.Classes,
+  System.IOUtils,
   DelphiLsp.Logging;
 
 function ReadAllStdin: TBytes;
@@ -83,6 +99,26 @@ begin
   end;
   if not MoveFileEx(PChar(TmpPath), PChar(Path), MOVEFILE_REPLACE_EXISTING) then
     Diag(Format('WriteFileAtomic MoveFileEx failed: %d', [GetLastError]));
+end;
+
+function TryReadAllText(const Path, DiagLabel: string;
+  out Content: string): Boolean;
+begin
+  Content := '';
+  Result := False;
+  if Path = '' then Exit;
+  if not FileExists(Path) then Exit;
+  try
+    Content := TFile.ReadAllText(Path, TEncoding.UTF8);
+    Result := True;
+  except
+    on E: Exception do
+    begin
+      Content := '';
+      if DiagLabel <> '' then
+        Diag(DiagLabel + ': ' + E.Message);
+    end;
+  end;
 end;
 
 end.

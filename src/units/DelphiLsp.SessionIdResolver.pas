@@ -98,7 +98,8 @@ uses
   System.JSON,
   DelphiLsp.Logging,
   DelphiLsp.Paths,
-  DelphiLsp.JsonUtils;
+  DelphiLsp.JsonUtils,
+  DelphiLsp.IO;
 
 function FilterUnsubstitutedPlaceholder(const Value: string): string;
 begin
@@ -179,16 +180,7 @@ begin
   Result := '';
   if (ClaudePidDir = '') or (Key = '') then Exit;
   Path := IncludeTrailingPathDelimiter(ClaudePidDir) + Key + '.json';
-  if not FileExists(Path) then Exit;
-  try
-    Content := TFile.ReadAllText(Path, TEncoding.UTF8);
-  except
-    on E: Exception do
-    begin
-      Diag('Hook-file read failed: ' + E.Message);
-      Exit;
-    end;
-  end;
+  if not TryReadAllText(Path, 'Hook-file read failed', Content) then Exit;
   Obj := TryParseJsonObject(Content);
   if Obj = nil then Exit;
   try
@@ -225,15 +217,9 @@ begin
   try
     repeat
       FullPath := IncludeTrailingPathDelimiter(ClaudePidDir) + SR.Name;
-      try
-        Content := TFile.ReadAllText(FullPath, TEncoding.UTF8);
-      except
-        on E: Exception do
-        begin
-          Diag('Hook by-id read failed for ' + SR.Name + ': ' + E.Message);
-          Continue;
-        end;
-      end;
+      if not TryReadAllText(FullPath,
+                            'Hook by-id read failed for ' + SR.Name,
+                            Content) then Continue;
       Obj := TryParseJsonObject(Content);
       if Obj = nil then Continue;
       try

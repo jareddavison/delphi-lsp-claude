@@ -26,6 +26,13 @@ type
     [Test] procedure WriteFileAtomic_NoTmpLeftBehindOnSuccess;
     [Test] procedure WriteFileAtomic_HandlesEmptyContent;
     [Test] procedure WriteFileAtomic_PreservesAtomicity_NoPartialReads;
+
+    // TryReadAllText
+    [Test] procedure TryRead_FileExists_ReturnsTrueAndContent;
+    [Test] procedure TryRead_MissingFile_ReturnsFalseSilent;
+    [Test] procedure TryRead_EmptyPath_ReturnsFalseSilent;
+    [Test] procedure TryRead_EmptyFile_ReturnsTrueWithEmptyContent;
+    [Test] procedure TryRead_RoundTripsUtf8Content;
   end;
 
 implementation
@@ -130,6 +137,56 @@ begin
     Assert.IsTrue(ReadBack = 'V' + I.ToString,
       'iteration ' + I.ToString + ' read back unexpected: ' + ReadBack);
   end;
+end;
+
+{ TryReadAllText }
+
+procedure TIOTests.TryRead_FileExists_ReturnsTrueAndContent;
+var
+  Content: string;
+begin
+  TFile.WriteAllText(PathOf('a.txt'), 'hello world', TEncoding.UTF8);
+  Assert.IsTrue(TryReadAllText(PathOf('a.txt'), 'unused', Content));
+  Assert.AreEqual('hello world', Content);
+end;
+
+procedure TIOTests.TryRead_MissingFile_ReturnsFalseSilent;
+var
+  Content: string;
+begin
+  // Missing file is not an "error" — caller can pre-check FileExists
+  // if it cares, otherwise gets a clean False.
+  Assert.IsFalse(TryReadAllText(PathOf('nope.txt'), 'unused', Content));
+  Assert.AreEqual('', Content);
+end;
+
+procedure TIOTests.TryRead_EmptyPath_ReturnsFalseSilent;
+var
+  Content: string;
+begin
+  Assert.IsFalse(TryReadAllText('', 'unused', Content));
+  Assert.AreEqual('', Content);
+end;
+
+procedure TIOTests.TryRead_EmptyFile_ReturnsTrueWithEmptyContent;
+var
+  Content: string;
+begin
+  // An empty file is a successful read — distinguishes from "missing".
+  TFile.WriteAllText(PathOf('empty.txt'), '', TEncoding.UTF8);
+  Assert.IsTrue(TryReadAllText(PathOf('empty.txt'), 'unused', Content));
+  Assert.AreEqual('', Content);
+end;
+
+procedure TIOTests.TryRead_RoundTripsUtf8Content;
+var
+  Content: string;
+const
+  Sample = 'café — açaí — 日本語';
+begin
+  TFile.WriteAllText(PathOf('utf8.txt'), Sample, TEncoding.UTF8);
+  Assert.IsTrue(TryReadAllText(PathOf('utf8.txt'), 'unused', Content));
+  Assert.AreEqual(Sample, Content);
 end;
 
 initialization

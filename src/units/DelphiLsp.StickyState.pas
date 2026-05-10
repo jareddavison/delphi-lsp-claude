@@ -43,7 +43,8 @@ uses
   System.Hash,
   DelphiLsp.Paths,
   DelphiLsp.Logging,
-  DelphiLsp.JsonUtils;
+  DelphiLsp.JsonUtils,
+  DelphiLsp.IO;
 
 function BuildStickyStatePath(const PluginDataBase, SessionId: string): string;
 begin
@@ -60,16 +61,7 @@ var
   Entry: TJSONObject;
 begin
   Result := '';
-  if (StatePath = '') or (not FileExists(StatePath)) then Exit;
-  try
-    Content := TFile.ReadAllText(StatePath, TEncoding.UTF8);
-  except
-    on E: Exception do
-    begin
-      Diag('Sticky read failed: ' + E.Message);
-      Exit;
-    end;
-  end;
+  if not TryReadAllText(StatePath, 'Sticky read failed', Content) then Exit;
   CwdHash := THashSHA2.GetHashString(NormalizeCwd(Cwd), SHA256);
   Root := TryParseJsonObject(Content);
   if Root = nil then Exit;
@@ -103,16 +95,9 @@ begin
 
   Root := nil;
   try
-    if FileExists(StatePath) then
-    begin
-      try
-        Content := TFile.ReadAllText(StatePath, TEncoding.UTF8);
-        Root := TryParseJsonObject(Content);
-      except
-        on E: Exception do
-          Diag('Sticky read-for-update failed: ' + E.Message);
-      end;
-    end;
+    if TryReadAllText(StatePath, 'Sticky read-for-update failed',
+                      Content) then
+      Root := TryParseJsonObject(Content);
     if Root = nil then Root := TJSONObject.Create;
 
     ExistingPair := Root.RemovePair(CwdHash);
