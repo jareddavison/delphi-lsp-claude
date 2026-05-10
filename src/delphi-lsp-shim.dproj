@@ -166,6 +166,31 @@
         <DelphiCompile Include="$(MainSource)">
             <MainSource>MainSource</MainSource>
         </DelphiCompile>
+        <DCCReference Include="units\DelphiLsp.ActiveProject.pas"/>
+        <DCCReference Include="units\DelphiLsp.DelphiInstall.pas"/>
+        <DCCReference Include="units\DelphiLsp.Diagnostics.pas"/>
+        <DCCReference Include="units\DelphiLsp.DprojParse.pas"/>
+        <DCCReference Include="units\DelphiLsp.Env.pas"/>
+        <DCCReference Include="units\DelphiLsp.Gc.pas"/>
+        <DCCReference Include="units\DelphiLsp.HookEntry.pas"/>
+        <DCCReference Include="units\DelphiLsp.IO.pas"/>
+        <DCCReference Include="units\DelphiLsp.JsonUtils.pas"/>
+        <DCCReference Include="units\DelphiLsp.Logging.pas"/>
+        <DCCReference Include="units\DelphiLsp.LspMessage.pas"/>
+        <DCCReference Include="units\DelphiLsp.LspPathResolver.pas"/>
+        <DCCReference Include="units\DelphiLsp.LspSession.pas"/>
+        <DCCReference Include="units\DelphiLsp.LspWire.pas"/>
+        <DCCReference Include="units\DelphiLsp.Paths.pas"/>
+        <DCCReference Include="units\DelphiLsp.PluginData.pas"/>
+        <DCCReference Include="units\DelphiLsp.ProcessTree.pas"/>
+        <DCCReference Include="units\DelphiLsp.Sentinels.pas"/>
+        <DCCReference Include="units\DelphiLsp.SentinelWatcher.pas"/>
+        <DCCReference Include="units\DelphiLsp.SessionIdResolver.pas"/>
+        <DCCReference Include="units\DelphiLsp.SessionRegistry.pas"/>
+        <DCCReference Include="units\DelphiLsp.SettingsResolver.pas"/>
+        <DCCReference Include="units\DelphiLsp.StickyState.pas"/>
+        <DCCReference Include="units\DelphiLsp.Walkers.pas"/>
+        <DCCReference Include="units\DelphiLsp.XmlDecode.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>
