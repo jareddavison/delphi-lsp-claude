@@ -100,6 +100,13 @@ function TryExtractTextDocumentUri(const Json: string;
 function TryApplyDidChange(const Json: string;
   var Doc: TOpenDocument): Boolean;
 
+// Extract the `id` field from a JSON-RPC message as a string. Returns
+// '' if the message has no id, isn't valid JSON, or isn't an object.
+// Numeric ids are returned as their decimal string form. Used by the
+// child-reader to match against a swallow list when /delphi-reload's
+// replayed-initialize response should be dropped.
+function ExtractMessageId(const Json: string): string;
+
 implementation
 
 uses
@@ -425,6 +432,30 @@ begin
     if (UriVal = nil) or (UriVal.Value = '') then Exit;
     Uri := UriVal.Value;
     Result := True;
+  finally
+    Root.Free;
+  end;
+end;
+
+function ExtractMessageId(const Json: string): string;
+var
+  Root: TJSONValue;
+  Obj: TJSONObject;
+  IdVal: TJSONValue;
+begin
+  Result := '';
+  Root := nil;
+  try
+    try
+      Root := TJSONObject.ParseJSONValue(Json);
+    except
+      Exit;
+    end;
+    if not (Root is TJSONObject) then Exit;
+    Obj := TJSONObject(Root);
+    IdVal := Obj.GetValue('id');
+    if IdVal = nil then Exit;
+    Result := IdVal.Value;
   finally
     Root.Free;
   end;

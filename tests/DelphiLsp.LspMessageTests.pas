@@ -75,6 +75,13 @@ type
     [Test] procedure TryApplyDidChange_NoVersionField_PreservesVersion;
     [Test] procedure TryApplyDidChange_NoUri_LeavesDocUntouched;
     [Test] procedure TryApplyDidChange_EmptyChangesArray_Succeeds;
+
+    // ExtractMessageId
+    [Test] procedure ExtractMessageId_NumericId_ReturnsDecimalString;
+    [Test] procedure ExtractMessageId_StringId_ReturnsString;
+    [Test] procedure ExtractMessageId_NegativeId_ReturnsNegativeString;
+    [Test] procedure ExtractMessageId_NoIdField_ReturnsEmpty;
+    [Test] procedure ExtractMessageId_InvalidJson_ReturnsEmpty;
   end;
 
 implementation
@@ -595,6 +602,40 @@ begin
     Doc));
   Assert.AreEqual('unchanged', Doc.Text);
   Assert.IsTrue(Doc.Version = 2);
+end;
+
+{ ExtractMessageId }
+
+procedure TLspMessageTests.ExtractMessageId_NumericId_ReturnsDecimalString;
+begin
+  Assert.AreEqual('42',
+    ExtractMessageId('{"jsonrpc":"2.0","id":42,"result":null}'));
+end;
+
+procedure TLspMessageTests.ExtractMessageId_StringId_ReturnsString;
+begin
+  Assert.AreEqual('replay-1',
+    ExtractMessageId('{"jsonrpc":"2.0","id":"replay-1","result":null}'));
+end;
+
+procedure TLspMessageTests.ExtractMessageId_NegativeId_ReturnsNegativeString;
+begin
+  // RecycleChild's synthetic ids are large negative integers.
+  Assert.AreEqual('-1000001',
+    ExtractMessageId('{"jsonrpc":"2.0","id":-1000001,"result":null}'));
+end;
+
+procedure TLspMessageTests.ExtractMessageId_NoIdField_ReturnsEmpty;
+begin
+  // Notifications (e.g. textDocument/publishDiagnostics) have no id —
+  // the reader should never attempt to swallow them.
+  Assert.AreEqual('', ExtractMessageId(
+    '{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{}}'));
+end;
+
+procedure TLspMessageTests.ExtractMessageId_InvalidJson_ReturnsEmpty;
+begin
+  Assert.AreEqual('', ExtractMessageId('{ broken'));
 end;
 
 initialization

@@ -58,23 +58,10 @@ uses
   DelphiLsp.HookEntry,
   DelphiLsp.Sentinels,
   DelphiLsp.SettingsResolver,
-  DelphiLsp.ActiveProject;
+  DelphiLsp.ActiveProject,
+  DelphiLsp.LspSession;
 
 type
-  TChildReaderThread = class(TThread)
-  private
-    FFromChild: TLspStream;
-    FToClient: TLspStream;
-    FSwallowIds: TList<string>;          // response IDs to drop (replay artifacts)
-    function ShouldDrop(const Json: string): Boolean;
-  protected
-    procedure Execute; override;
-  public
-    constructor Create(AFromChild, AToClient: TLspStream);
-    destructor Destroy; override;
-    procedure SwallowResponseId(const Id: string);
-  end;
-
   // Watches the per-session sentinel directory for `active.txt`/`reload.flag`
   // changes (slash commands deposit them) and refires `didChangeConfiguration`
   // / triggers recycle as appropriate.
@@ -88,47 +75,6 @@ type
     constructor Create(const ADir: string);
     destructor Destroy; override;
     procedure SignalShutdown;
-  end;
-
-  // Encapsulates the LSP-session-scoped state that survives both
-  // /delphi-project switches AND /delphi-reload recycles:
-  //   - parent stdin/stdout streams (whole shim lifetime)
-  //   - child stdin/stdout streams + process handle (replaced on recycle)
-  //   - child-stdin write lock
-  //   - DidFireConfig flag
-  //   - cached `initialize` / `initialized` JSON for replay
-  //   - dictionary of open documents (mirrors what the LSP client believes
-  //     is open, used to replay didOpen to a fresh child)
-  // RunProxy stays a free function but reads/writes through this object.
-  TLspSession = class
-  private
-    FClientToShim: TLspStream;
-    FShimToClient: TLspStream;
-    FShimToChild: TLspStream;
-    FChildToShim: TLspStream;
-    FChildIn: THandle;
-    FChildOut: THandle;
-    FChildHandle: THandle;
-    FChildInLock: TCriticalSection;     // serializes track + write + recycle
-    FDidFireConfig: Boolean;
-    FOpenDocs: TDictionary<string, TOpenDocument>;
-    FCachedInitJson: string;
-    FCachedInitializedJson: string;
-    FReader: TChildReaderThread;
-    FRecycleCounter: Integer;            // distinguishes synthetic init IDs across recycles
-    procedure WriteRawLocked(const Json: string);
-    procedure TrackOutgoingMessageLocked(const Json: string; const Method: string);
-  public
-    constructor Create(AClientIn, AClientOut: THandle);
-    destructor Destroy; override;
-    function StartChildConnection: Boolean;
-    procedure StopChildConnection;
-    procedure WriteToChild(const Json: string);
-    procedure SendToChild(const Json: string; const Method: string);
-    procedure RecycleChild;
-    function ChildAlive: Boolean;
-    property ClientStream: TLspStream read FClientToShim;
-    property DidFireConfig: Boolean read FDidFireConfig write FDidFireConfig;
   end;
 
 var
@@ -173,314 +119,6 @@ begin
   end;
 end;
 
-
-{ TLspSession }
-
-constructor TLspSession.Create(AClientIn, AClientOut: THandle);
-begin
-  inherited Create;
-  FChildInLock := TCriticalSection.Create;
-  FOpenDocs := TDictionary<string, TOpenDocument>.Create;
-  FClientToShim := TLspStream.Create(AClientIn);
-  FShimToClient := TLspStream.Create(AClientOut);
-end;
-
-destructor TLspSession.Destroy;
-begin
-  StopChildConnection;
-  FClientToShim.Free;
-  FShimToClient.Free;
-  FOpenDocs.Free;
-  FChildInLock.Free;
-  inherited;
-end;
-
-function TLspSession.StartChildConnection: Boolean;
-var
-  SecAttr: TSecurityAttributes;
-  ChildInRead, ChildOutWrite: THandle;
-  StartupInfo: TStartupInfo;
-  ProcInfo: TProcessInformation;
-  CmdLine: string;
-  ExePath, LogModes, Cwd, ExeSource, SettingsPath: string;
-begin
-  Result := False;
-  SecAttr.nLength := SizeOf(SecAttr);
-  SecAttr.bInheritHandle := True;
-  SecAttr.lpSecurityDescriptor := nil;
-
-  if not CreatePipe(ChildInRead, FChildIn, @SecAttr, 0) then
-  begin
-    Diag(Format('CreatePipe (stdin) failed: %d', [GetLastError]));
-    Exit;
-  end;
-  SetHandleInformation(FChildIn, HANDLE_FLAG_INHERIT, 0);
-
-  if not CreatePipe(FChildOut, ChildOutWrite, @SecAttr, 0) then
-  begin
-    Diag(Format('CreatePipe (stdout) failed: %d', [GetLastError]));
-    CloseHandle(ChildInRead); CloseHandle(FChildIn);
-    Exit;
-  end;
-  SetHandleInformation(FChildOut, HANDLE_FLAG_INHERIT, 0);
-
-  ZeroMemory(@StartupInfo, SizeOf(StartupInfo));
-  StartupInfo.cb := SizeOf(StartupInfo);
-  StartupInfo.dwFlags := STARTF_USESTDHANDLES;
-  StartupInfo.hStdInput := ChildInRead;
-  StartupInfo.hStdOutput := ChildOutWrite;
-  StartupInfo.hStdError := GetStdHandle(STD_ERROR_HANDLE);
-
-  SettingsPath := '';
-  TMonitor.Enter(GProjectGuard);
-  try
-    if GActiveProject <> nil then SettingsPath := GActiveProject.Path;
-  finally
-    TMonitor.Exit(GProjectGuard);
-  end;
-
-  ExePath := ResolveDelphiLspPath(SettingsPath, GSessionDir, ExeSource);
-  LogModes := GetEnv('DELPHI_LSP_LOG_MODES', '0');
-  Cwd := GetCurrentDir;
-  CmdLine := Format('"%s" -LogModes %s -LSPLogging "%s"', [ExePath, LogModes, Cwd]);
-
-  Diag(Format('Resolved DelphiLSP: %s (source=%s)', [ExePath, ExeSource]));
-  Diag('Spawning: ' + CmdLine);
-  Diag('Cwd: ' + Cwd);
-
-  UniqueString(CmdLine);
-  if not CreateProcess(nil, PChar(CmdLine), nil, nil, True, 0, nil, nil,
-                       StartupInfo, ProcInfo) then
-  begin
-    Diag(Format('CreateProcess failed: %d', [GetLastError]));
-    CloseHandle(ChildInRead); CloseHandle(FChildIn);
-    CloseHandle(ChildOutWrite); CloseHandle(FChildOut);
-    Exit;
-  end;
-
-  FChildHandle := ProcInfo.hProcess;
-  CloseHandle(ProcInfo.hThread);
-  CloseHandle(ChildInRead);
-  CloseHandle(ChildOutWrite);
-  FShimToChild := TLspStream.Create(FChildIn);
-  FChildToShim := TLspStream.Create(FChildOut);
-  // Reader thread is owned by the session — replaced on every recycle.
-  FReader := TChildReaderThread.Create(FChildToShim, FShimToClient);
-  FReader.FreeOnTerminate := False;
-  Result := True;
-end;
-
-procedure TLspSession.StopChildConnection;
-begin
-  // Close child stdin first so the child sees EOF and (often) exits cleanly,
-  // freeing it to release its end of the stdout pipe.
-  if FChildIn <> 0 then
-  begin
-    CloseHandle(FChildIn);
-    FChildIn := 0;
-  end;
-  if FChildHandle <> 0 then
-  begin
-    if WaitForSingleObject(FChildHandle, 2000) = WAIT_TIMEOUT then
-      TerminateProcess(FChildHandle, 0);
-    CloseHandle(FChildHandle);
-    FChildHandle := 0;
-  end;
-  // Reader's blocking ReadFile on FChildOut now returns ERROR_BROKEN_PIPE,
-  // ReadMessage returns False, Execute exits — we just have to wait.
-  if FReader <> nil then
-  begin
-    FReader.Terminate; // belt-and-suspenders if reader is somewhere else
-    FReader.WaitFor;
-    FReader.Free;
-    FReader := nil;
-  end;
-  if FChildOut <> 0 then
-  begin
-    CloseHandle(FChildOut);
-    FChildOut := 0;
-  end;
-  if FShimToChild <> nil then
-  begin
-    FShimToChild.Free;
-    FShimToChild := nil;
-  end;
-  if FChildToShim <> nil then
-  begin
-    FChildToShim.Free;
-    FChildToShim := nil;
-  end;
-end;
-
-procedure TLspSession.WriteRawLocked(const Json: string);
-begin
-  if FShimToChild <> nil then
-    FShimToChild.WriteMessage(Json);
-end;
-
-procedure TLspSession.WriteToChild(const Json: string);
-begin
-  FChildInLock.Acquire;
-  try
-    WriteRawLocked(Json);
-  finally
-    FChildInLock.Release;
-  end;
-end;
-
-procedure TLspSession.SendToChild(const Json: string; const Method: string);
-begin
-  FChildInLock.Acquire;
-  try
-    try
-      TrackOutgoingMessageLocked(Json, Method);
-    except
-      on E: Exception do Diag('TrackOutgoingMessage error: ' + E.Message);
-    end;
-    WriteRawLocked(Json);
-  finally
-    FChildInLock.Release;
-  end;
-end;
-
-function TLspSession.ChildAlive: Boolean;
-begin
-  Result := FShimToChild <> nil;
-end;
-
-// Parse outgoing client-to-child message and update session-state mirrors.
-// Caches initialize/initialized verbatim. Tracks didOpen/didChange/didClose
-// in FOpenDocs so a later /delphi-reload can replay the synthetic didOpens
-// to a fresh DelphiLSP child. Caller must hold FChildInLock — this method
-// makes no further locking.
-procedure TLspSession.TrackOutgoingMessageLocked(const Json: string; const Method: string);
-var
-  Uri: string;
-  Doc: TOpenDocument;
-begin
-  if (Method = 'initialize') and (FCachedInitJson = '') then
-  begin
-    FCachedInitJson := Json;
-    Diag('Cached initialize message');
-    Exit;
-  end;
-  if (Method = 'initialized') and (FCachedInitializedJson = '') then
-  begin
-    FCachedInitializedJson := Json;
-    Diag('Cached initialized notification');
-    Exit;
-  end;
-
-  if Method = 'textDocument/didOpen' then
-  begin
-    if not TryParseDidOpen(Json, Uri, Doc) then Exit;
-    FOpenDocs.AddOrSetValue(Uri, Doc);
-    Diag(Format('didOpen tracked: %s (lang=%s, ver=%d, len=%d)',
-      [Uri, Doc.LanguageId, Doc.Version, Length(Doc.Text)]));
-  end
-  else if Method = 'textDocument/didChange' then
-  begin
-    if not TryExtractTextDocumentUri(Json, Uri) then Exit;
-    if not FOpenDocs.TryGetValue(Uri, Doc) then
-    begin
-      Diag('didChange for untracked document: ' + Uri);
-      Exit;
-    end;
-    if TryApplyDidChange(Json, Doc) then
-      FOpenDocs.AddOrSetValue(Uri, Doc);
-  end
-  else if Method = 'textDocument/didClose' then
-  begin
-    if not TryExtractTextDocumentUri(Json, Uri) then Exit;
-    if FOpenDocs.ContainsKey(Uri) then
-    begin
-      FOpenDocs.Remove(Uri);
-      Diag('didClose tracked: ' + Uri);
-    end;
-  end;
-end;
-
-// Kill the current DelphiLSP child and start a new one. Replays:
-//   1. cached `initialize` (rewritten with a synthetic ID we own; reader
-//      drops the matching response so the client never sees a duplicate)
-//   2. cached `initialized` notification
-//   3. `workspace/didChangeConfiguration` for the current active project
-//   4. `textDocument/didOpen` for every entry in FOpenDocs
-// Holds FChildInLock for the whole sequence so the main proxy loop's
-// next forward goes to the new child cleanly.
-procedure TLspSession.RecycleChild;
-var
-  CachedInit, CachedInited, CurrentUri: string;
-  ReplayIdNum: Integer;
-  Pair: TPair<string, TOpenDocument>;
-  ReplayedDocs: Integer;
-begin
-  Diag('RecycleChild: starting');
-  if FCachedInitJson = '' then
-  begin
-    Diag('RecycleChild: no cached initialize, aborting');
-    Exit;
-  end;
-
-  FChildInLock.Acquire;
-  try
-    CachedInit := FCachedInitJson;
-    CachedInited := FCachedInitializedJson;
-
-    // Tear down old child (closes pipes, joins reader, frees streams).
-    StopChildConnection;
-
-    // Spawn fresh child + start a new reader for it.
-    if not StartChildConnection then
-    begin
-      Diag('RecycleChild: StartChildConnection failed; shim is now without a child');
-      Exit;
-    end;
-
-    // Synthetic ID lets the reader recognize and drop the replayed init's
-    // response (the original ID was already consumed by the LSP client).
-    // Distinctive large negative value: very unlikely to collide with the
-    // LSP client's positive-integer id stream, and a number (not a string)
-    // because DelphiLSP doesn't echo string ids — see RewriteInitId comment.
-    Inc(FRecycleCounter);
-    ReplayIdNum := -1000000 - FRecycleCounter;
-    if FReader <> nil then
-      FReader.SwallowResponseId(IntToStr(ReplayIdNum));
-
-    WriteRawLocked(RewriteInitId(CachedInit, ReplayIdNum));
-    if CachedInited <> '' then
-      WriteRawLocked(CachedInited);
-
-    // Re-fire didChangeConfiguration for current project, if known.
-    TMonitor.Enter(GProjectGuard);
-    try
-      if GActiveProject <> nil then
-        CurrentUri := GActiveProject.Uri
-      else
-        CurrentUri := '';
-    finally
-      TMonitor.Exit(GProjectGuard);
-    end;
-    if CurrentUri <> '' then
-      WriteRawLocked(MakeDidChangeConfigJson(CurrentUri));
-
-    // Replay every open document so DelphiLSP rebuilds its in-memory model.
-    ReplayedDocs := 0;
-    for Pair in FOpenDocs do
-    begin
-      WriteRawLocked(MakeDidOpenJson(Pair.Key, Pair.Value));
-      Inc(ReplayedDocs);
-    end;
-
-    Diag(Format('RecycleChild: replay complete (replayId=%d, didOpens=%d)',
-      [ReplayIdNum, ReplayedDocs]));
-  finally
-    FChildInLock.Release;
-  end;
-end;
-
-// Forward decls — sticky-pick helpers live further down (grouped with other
-// plugin-data resolution), but SwitchToProject below needs to call them.
 
 // Replace the active project. Frees the old TActiveProject (which stops
 // its watcher) and constructs a new one with its own watcher and seeded
@@ -595,13 +233,27 @@ end;
 // notices, this function is called, the flag is consumed (deleted), and the
 // session recycles its DelphiLSP child.
 procedure ReadAndApplyReloadFlag;
+var
+  SettingsPath, CurrentUri: string;
 begin
   if GSessionDir = '' then Exit;
   if not ConsumeFlagFile(IncludeTrailingPathDelimiter(GSessionDir) +
                          'reload.flag') then Exit;
   Diag('Reload flag detected; recycling child');
-  if GSession <> nil then
-    GSession.RecycleChild;
+  if GSession = nil then Exit;
+  SettingsPath := '';
+  CurrentUri := '';
+  TMonitor.Enter(GProjectGuard);
+  try
+    if GActiveProject <> nil then
+    begin
+      SettingsPath := GActiveProject.Path;
+      CurrentUri := GActiveProject.Uri;
+    end;
+  finally
+    TMonitor.Exit(GProjectGuard);
+  end;
+  GSession.RecycleChild(SettingsPath, GSessionDir, CurrentUri);
 end;
 
 
@@ -810,85 +462,6 @@ begin
   Diag('Sentinel watcher exiting');
 end;
 
-{ Child-reader thread: drains DelphiLSP -> our stdout }
-
-constructor TChildReaderThread.Create(AFromChild, AToClient: TLspStream);
-begin
-  FFromChild := AFromChild;
-  FToClient := AToClient;
-  FSwallowIds := TList<string>.Create;
-  inherited Create(False);
-end;
-
-destructor TChildReaderThread.Destroy;
-begin
-  FSwallowIds.Free;
-  inherited;
-end;
-
-// Register a response ID that the reader should drop on its next sighting,
-// then forget. Used by RecycleChild for the synthetic-init response.
-procedure TChildReaderThread.SwallowResponseId(const Id: string);
-begin
-  TMonitor.Enter(FSwallowIds);
-  try
-    FSwallowIds.Add(Id);
-  finally
-    TMonitor.Exit(FSwallowIds);
-  end;
-end;
-
-function TChildReaderThread.ShouldDrop(const Json: string): Boolean;
-var
-  Root: TJSONValue;
-  Obj: TJSONObject;
-  IdVal: TJSONValue;
-  IdStr: string;
-  Idx: Integer;
-begin
-  Result := False;
-  Root := nil;
-  try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := TJSONObject(Root);
-    IdVal := Obj.GetValue('id');
-    if IdVal = nil then Exit;
-    IdStr := IdVal.Value;
-    TMonitor.Enter(FSwallowIds);
-    try
-      Idx := FSwallowIds.IndexOf(IdStr);
-      if Idx >= 0 then
-      begin
-        FSwallowIds.Delete(Idx);
-        Result := True;
-        Diag('Reader dropped replayed-init response (id=' + IdStr + ')');
-      end;
-    finally
-      TMonitor.Exit(FSwallowIds);
-    end;
-  finally
-    Root.Free;
-  end;
-end;
-
-procedure TChildReaderThread.Execute;
-var
-  Json: string;
-begin
-  while not Terminated do
-  begin
-    if not FFromChild.ReadMessage(Json) then Break;
-    if ShouldDrop(Json) then Continue;
-    if not FToClient.WriteMessage(Json) then Break;
-  end;
-  Diag('Child reader thread exiting');
-end;
-
 { Hook mode entry points are in DelphiLsp.HookEntry. }
 
 procedure RunProxy;
@@ -1018,6 +591,7 @@ end;
 
 var
   SentinelWatcher: TSentinelWatcherThread;
+  InitialSettingsPath: string;
 begin
   SetLogPath(GetEnv('DELPHI_LSP_SHIM_LOG', ''));
 
@@ -1103,12 +677,21 @@ begin
     // ran /delphi-project before this shim started up), pick it up now so
     // our initial `didChangeConfiguration` fires with the right URI.
     ReadAndApplySentinel;
-    if GActiveProject <> nil then
-      Diag('Effective settings URI: ' + GActiveProject.Uri)
-    else
-      Diag('Effective settings URI: (none)');
+    InitialSettingsPath := '';
+    TMonitor.Enter(GProjectGuard);
+    try
+      if GActiveProject <> nil then
+      begin
+        InitialSettingsPath := GActiveProject.Path;
+        Diag('Effective settings URI: ' + GActiveProject.Uri);
+      end
+      else
+        Diag('Effective settings URI: (none)');
+    finally
+      TMonitor.Exit(GProjectGuard);
+    end;
 
-    if not GSession.StartChildConnection then
+    if not GSession.StartChildConnection(InitialSettingsPath, GSessionDir) then
     begin
       Writeln(ErrOutput, 'delphi-lsp-shim: failed to spawn DelphiLSP');
       Halt(1);
