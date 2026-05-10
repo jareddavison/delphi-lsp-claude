@@ -56,7 +56,8 @@ uses
   DelphiLsp.LspPathResolver,
   DelphiLsp.Diagnostics,
   DelphiLsp.HookEntry,
-  DelphiLsp.Sentinels;
+  DelphiLsp.Sentinels,
+  DelphiLsp.SettingsResolver;
 
 type
   TChildReaderThread = class(TThread)
@@ -1235,48 +1236,56 @@ procedure InitSettings;
 var
   Explicit, Sticky: string;
   Acc: TList<string>;
+  Candidates: TArray<string>;
+  Decision: TInitSettingsResult;
   I: Integer;
 begin
   Explicit := GetEnv('DELPHI_LSP_SETTINGS', '');
-  if (Explicit <> '') and FileExists(Explicit) then
-  begin
-    GActiveProject := TActiveProject.Create(Explicit);
-    GActiveProject.StartWatcher;
-    Diag('Initial settings URI (env DELPHI_LSP_SETTINGS): ' + GActiveProject.Uri);
-    Exit;
-  end;
-
+  if (Explicit <> '') and not FileExists(Explicit) then Explicit := '';
   Sticky := ReadStickyForCwd(GSessionStatePath, GetCurrentDir);
-  if Sticky <> '' then
-  begin
-    GActiveProject := TActiveProject.Create(Sticky);
-    GActiveProject.StartWatcher;
-    Diag('Restored sticky pick from previous session: ' + GActiveProject.Uri +
-         ' — /delphi-project to change');
-    Exit;
-  end;
 
   Acc := TList<string>.Create;
   try
     CollectFilesByExt(GetCurrentDir, '.delphilsp.json', 0, Acc);
-    if Acc.Count = 0 then
-    begin
-      Diag('No .delphilsp.json found in workspace');
-      Exit;
-    end;
-    if Acc.Count = 1 then
-    begin
-      GActiveProject := TActiveProject.Create(Acc[0]);
-      GActiveProject.StartWatcher;
-      Diag('Initial settings URI (single candidate): ' + GActiveProject.Uri);
-      WriteStickyForCwd(GSessionStatePath, GetCurrentDir, Acc[0]);
-      Exit;
-    end;
-    Diag(Format('Multiple .delphilsp.json candidates (%d); shim starts without project — user must run /delphi-project', [Acc.Count]));
-    for I := 0 to Acc.Count - 1 do
-      Diag('  candidate: ' + Acc[I]);
+    SetLength(Candidates, Acc.Count);
+    for I := 0 to Acc.Count - 1 do Candidates[I] := Acc[I];
   finally
     Acc.Free;
+  end;
+
+  Decision := ResolveInitialSettings(Explicit, Sticky, Candidates);
+  case Decision.Action of
+    isaUseExplicit:
+    begin
+      GActiveProject := TActiveProject.Create(Decision.ResolvedPath);
+      GActiveProject.StartWatcher;
+      Diag('Initial settings URI (env DELPHI_LSP_SETTINGS): ' +
+           GActiveProject.Uri);
+    end;
+    isaUseSticky:
+    begin
+      GActiveProject := TActiveProject.Create(Decision.ResolvedPath);
+      GActiveProject.StartWatcher;
+      Diag('Restored sticky pick from previous session: ' +
+           GActiveProject.Uri + ' — /delphi-project to change');
+    end;
+    isaUseSingleCandidate:
+    begin
+      GActiveProject := TActiveProject.Create(Decision.ResolvedPath);
+      GActiveProject.StartWatcher;
+      Diag('Initial settings URI (single candidate): ' + GActiveProject.Uri);
+      WriteStickyForCwd(GSessionStatePath, GetCurrentDir,
+                        Decision.ResolvedPath);
+    end;
+    isaNone:
+      Diag('No .delphilsp.json found in workspace');
+    isaMultiCandidate:
+    begin
+      Diag(Format('Multiple .delphilsp.json candidates (%d); shim starts without project — user must run /delphi-project',
+        [Length(Decision.Candidates)]));
+      for I := 0 to High(Decision.Candidates) do
+        Diag('  candidate: ' + Decision.Candidates[I]);
+    end;
   end;
 end;
 
