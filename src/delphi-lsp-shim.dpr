@@ -60,7 +60,8 @@ uses
   DelphiLsp.SettingsResolver,
   DelphiLsp.ActiveProject,
   DelphiLsp.LspSession,
-  DelphiLsp.SentinelWatcher;
+  DelphiLsp.SentinelWatcher,
+  DelphiLsp.SessionRegistry;
 
 var
   GSession: TLspSession;              // session-scoped state (streams, child, open docs, init cache)
@@ -308,57 +309,6 @@ begin
   Diag('Session state path: ' + GSessionStatePath);
 end;
 
-procedure RegisterSession;
-var
-  Base, SessionsRoot, WorkspaceFile: string;
-  WS: TStringList;
-begin
-  Base := ResolvePluginDataBase;
-  if Base = '' then
-  begin
-    Diag('No usable data dir; running without per-session sentinel');
-    Exit;
-  end;
-  SessionsRoot := IncludeTrailingPathDelimiter(Base) + 'sessions';
-  GcOrphanSessions(SessionsRoot, GetCurrentProcessId);
-  GSessionDir := IncludeTrailingPathDelimiter(SessionsRoot) +
-                 IntToStr(GetCurrentProcessId);
-  GActiveSentinelPath := IncludeTrailingPathDelimiter(GSessionDir) + 'active.txt';
-  try
-    if not ForceDirectories(GSessionDir) then
-    begin
-      Diag('ForceDirectories failed: ' + GSessionDir);
-      GSessionDir := ''; GActiveSentinelPath := '';
-      Exit;
-    end;
-    WorkspaceFile := IncludeTrailingPathDelimiter(GSessionDir) + 'workspace.txt';
-    WS := TStringList.Create;
-    try
-      WS.Add(GetCurrentDir);
-      WS.SaveToFile(WorkspaceFile, TEncoding.UTF8);
-    finally
-      WS.Free;
-    end;
-    Diag('Registered session at ' + GSessionDir);
-  except
-    on E: Exception do
-    begin
-      Diag('Session registration failed: ' + E.Message);
-      GSessionDir := ''; GActiveSentinelPath := '';
-    end;
-  end;
-end;
-
-procedure UnregisterSession;
-begin
-  if GSessionDir = '' then Exit;
-  try
-    TDirectory.Delete(GSessionDir, True);
-  except
-    // best effort; an orphaned session dir is harmless
-  end;
-end;
-
 { Hook mode entry points are in DelphiLsp.HookEntry. }
 
 procedure RunProxy;
@@ -489,6 +439,7 @@ end;
 var
   SentinelWatcher: TSentinelWatcherThread;
   InitialSettingsPath: string;
+  Reg: TSessionRegistration;
 begin
   SetLogPath(GetEnv('DELPHI_LSP_SHIM_LOG', ''));
 
@@ -569,7 +520,9 @@ begin
       Diag('GC: skipping (own session .jsonl not found or session id unresolved)');
     InitSettings;
 
-    RegisterSession;
+    Reg := RegisterSession;
+    GSessionDir := Reg.SessionDir;
+    GActiveSentinelPath := Reg.ActiveSentinelPath;
     // If a sentinel was already deposited before our spawn (e.g., the user
     // ran /delphi-project before this shim started up), pick it up now so
     // our initial `didChangeConfiguration` fires with the right URI.
@@ -629,7 +582,7 @@ begin
         TMonitor.Exit(GProjectGuard);
       end;
 
-      UnregisterSession;
+      UnregisterSession(GSessionDir);
     end;
   except
     on E: Exception do
