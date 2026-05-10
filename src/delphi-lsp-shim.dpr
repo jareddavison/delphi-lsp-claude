@@ -61,7 +61,8 @@ uses
   DelphiLsp.ActiveProject,
   DelphiLsp.LspSession,
   DelphiLsp.SentinelWatcher,
-  DelphiLsp.SessionRegistry;
+  DelphiLsp.SessionRegistry,
+  DelphiLsp.Env;
 
 var
   GSession: TLspSession;              // session-scoped state (streams, child, open docs, init cache)
@@ -71,12 +72,6 @@ var
   GActiveSentinelPath: string;        // <session>/active.txt
   GClaudeSessionId: string;           // CLAUDE_CODE_SESSION_ID — stable across resume, '' if absent
   GSessionStatePath: string;          // ${CLAUDE_PLUGIN_DATA}/session-state/<claude-session-id>.json — sticky bindings, survives shim death
-
-function GetEnv(const Name, Default: string): string;
-begin
-  Result := GetEnvironmentVariable(Name);
-  if Result = '' then Result := Default;
-end;
 
 // Replace the active project. Frees the old TActiveProject (which stops
 // its watcher) and constructs a new one with its own watcher and seeded
@@ -304,8 +299,7 @@ begin
     Diag('No plugin-data base; cross-session sticky disabled');
     Exit;
   end;
-  GSessionStatePath := IncludeTrailingPathDelimiter(Base) + 'session-state' +
-                       PathDelim + GClaudeSessionId + '.json';
+  GSessionStatePath := BuildStickyStatePath(Base, GClaudeSessionId);
   Diag('Session state path: ' + GSessionStatePath);
 end;
 

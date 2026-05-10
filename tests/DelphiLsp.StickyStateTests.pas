@@ -42,6 +42,13 @@ type
     // Round trip
     [Test] procedure Roundtrip_WriteThenRead_ReturnsSamePath;
     [Test] procedure Roundtrip_NormalizesCwd_TrailingSlashIgnored;
+
+    // BuildStickyStatePath
+    [Test] procedure BuildPath_BothInputsPresent_ReturnsCanonicalForm;
+    [Test] procedure BuildPath_EmptyBase_ReturnsEmpty;
+    [Test] procedure BuildPath_EmptySessionId_ReturnsEmpty;
+    [Test] procedure BuildPath_BaseWithoutTrailingSlash_StillCorrect;
+    [Test] procedure BuildPath_BaseWithTrailingSlash_NoDoubleSeparator;
   end;
 
 implementation
@@ -212,6 +219,41 @@ begin
   WriteStickyForCwd(FStatePath, 'D:\Some\Cwd\', FSettingsFile);
   Assert.AreEqual(FSettingsFile, ReadStickyForCwd(FStatePath, 'D:\Some\Cwd'),
     'trailing-slash form must canonicalize to the same hash');
+end;
+
+{ BuildStickyStatePath }
+
+procedure TStickyStateTests.BuildPath_BothInputsPresent_ReturnsCanonicalForm;
+begin
+  Assert.AreEqual(
+    'C:\PluginData\session-state\my-session-id.json',
+    BuildStickyStatePath('C:\PluginData', 'my-session-id'));
+end;
+
+procedure TStickyStateTests.BuildPath_EmptyBase_ReturnsEmpty;
+begin
+  Assert.AreEqual('', BuildStickyStatePath('', 'session'));
+end;
+
+procedure TStickyStateTests.BuildPath_EmptySessionId_ReturnsEmpty;
+begin
+  Assert.AreEqual('', BuildStickyStatePath('C:\PluginData', ''));
+end;
+
+procedure TStickyStateTests.BuildPath_BaseWithoutTrailingSlash_StillCorrect;
+begin
+  Assert.AreEqual(
+    'D:\Data\session-state\sid.json',
+    BuildStickyStatePath('D:\Data', 'sid'));
+end;
+
+procedure TStickyStateTests.BuildPath_BaseWithTrailingSlash_NoDoubleSeparator;
+begin
+  // IncludeTrailingPathDelimiter is idempotent — a base that already
+  // ends in '\' must not produce '\\'.
+  Assert.AreEqual(
+    'D:\Data\session-state\sid.json',
+    BuildStickyStatePath('D:\Data\', 'sid'));
 end;
 
 initialization

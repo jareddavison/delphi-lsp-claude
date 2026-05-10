@@ -73,7 +73,8 @@ uses
   DelphiLsp.ProcessTree,
   DelphiLsp.DprojParse,
   DelphiLsp.PluginData,
-  DelphiLsp.IO;
+  DelphiLsp.IO,
+  DelphiLsp.StickyState;
 
 function ParseSessionStartPayload(const Json: string;
   out SessionId, Cwd: string): Boolean;
@@ -287,8 +288,7 @@ begin
     Diag(Format('  ancestor[%d]=%d', [I, Ancestors[I]]));
 
   // Multi-candidate prompt: only if no sticky AND >1 .delphilsp.json files.
-  StickyFile := IncludeTrailingPathDelimiter(Base) + 'session-state' +
-                PathDelim + SessionId + '.json';
+  StickyFile := BuildStickyStatePath(Base, SessionId);
   CwdHash := THashSHA2.GetHashString(NormalizeCwd(Cwd), SHA256);
   HasSticky := False;
   if FileExists(StickyFile) then

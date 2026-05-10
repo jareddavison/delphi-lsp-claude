@@ -40,14 +40,9 @@ implementation
 uses
   System.SysUtils,
   System.Classes,
+  DelphiLsp.Env,
   DelphiLsp.Logging,
   DelphiLsp.DelphiInstall;
-
-function GetEnv(const Name, Default: string): string;
-begin
-  Result := GetEnvironmentVariable(Name);
-  if Result = '' then Result := Default;
-end;
 
 function ResolveDelphiLspPath(const SettingsPath, SessionDir: string;
   out Source: string): string;

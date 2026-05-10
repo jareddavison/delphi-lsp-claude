@@ -120,6 +120,7 @@ implementation
 
 uses
   System.SysUtils,
+  DelphiLsp.Env,
   DelphiLsp.Logging,
   DelphiLsp.LspPathResolver;
 
@@ -129,12 +130,6 @@ const
 begin
   Inc(Counter);
   Result := Base - Counter;
-end;
-
-function GetEnv(const Name, Default: string): string;
-begin
-  Result := GetEnvironmentVariable(Name);
-  if Result = '' then Result := Default;
 end;
 
 { TChildReaderThread }

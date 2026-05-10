@@ -49,13 +49,8 @@ function IsClaudeSessionAlive(const ProjectsRoot, SessionId: string): Boolean;
 implementation
 
 uses
-  System.SysUtils;
-
-function GetEnv(const Name, Default: string): string;
-begin
-  Result := GetEnvironmentVariable(Name);
-  if Result = '' then Result := Default;
-end;
+  System.SysUtils,
+  DelphiLsp.Env;
 
 function ResolvePluginDataBase: string;
 begin

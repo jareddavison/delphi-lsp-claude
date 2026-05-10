@@ -62,13 +62,8 @@ uses
   System.IOUtils,
   System.RegularExpressions,
   System.Win.Registry,
+  DelphiLsp.Env,
   DelphiLsp.Logging;
-
-function GetEnv(const Name, Default: string): string;
-begin
-  Result := GetEnvironmentVariable(Name);
-  if Result = '' then Result := Default;
-end;
 
 function FindDelphiLspExeUnder(const BdsRoot: string): string;
 var

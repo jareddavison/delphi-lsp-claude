@@ -15,6 +15,12 @@ unit DelphiLsp.StickyState;
 
 interface
 
+// Build the conventional sticky-state file path for a given Claude
+// Code session id. Convention: <PluginDataBase>/session-state/<id>.json.
+// Returns '' if either input is empty so callers can guard with a
+// single non-empty check before reading/writing.
+function BuildStickyStatePath(const PluginDataBase, SessionId: string): string;
+
 // Read the sticky pick for the given cwd from StatePath. Returns the
 // absolute .delphilsp.json path if a valid entry exists AND the file still
 // exists on disk; '' otherwise. Returns '' if StatePath is empty or doesn't
@@ -37,6 +43,13 @@ uses
   System.Hash,
   DelphiLsp.Paths,
   DelphiLsp.Logging;
+
+function BuildStickyStatePath(const PluginDataBase, SessionId: string): string;
+begin
+  if (PluginDataBase = '') or (SessionId = '') then Exit('');
+  Result := IncludeTrailingPathDelimiter(PluginDataBase) + 'session-state' +
+            PathDelim + SessionId + '.json';
+end;
 
 function ReadStickyForCwd(const StatePath, Cwd: string): string;
 var
