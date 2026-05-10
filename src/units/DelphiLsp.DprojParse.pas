@@ -62,7 +62,8 @@ uses
   System.Generics.Collections,
   DelphiLsp.XmlDecode,
   DelphiLsp.Walkers,
-  DelphiLsp.Logging;
+  DelphiLsp.Logging,
+  DelphiLsp.JsonUtils;
 
 function ExtractDccFlagValue(const DccOptions, Flag: string): string;
 var
@@ -83,7 +84,8 @@ end;
 function ResolveDcuOutputDir(const DelphilspPath: string): string;
 var
   Content, DccOptions, RelPath: string;
-  Root, SettingsVal, OptsVal: TJSONValue;
+  Root: TJSONObject;
+  SettingsVal, OptsVal: TJSONValue;
 begin
   Result := '';
   if not FileExists(DelphilspPath) then Exit;
@@ -92,15 +94,10 @@ begin
   except
     Exit;
   end;
-  Root := nil;
+  Root := TryParseJsonObject(Content);
+  if Root = nil then Exit;
   try
-    try
-      Root := TJSONObject.ParseJSONValue(Content);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    SettingsVal := TJSONObject(Root).GetValue('settings');
+    SettingsVal := Root.GetValue('settings');
     if not (SettingsVal is TJSONObject) then Exit;
     OptsVal := TJSONObject(SettingsVal).GetValue('dccOptions');
     if OptsVal = nil then Exit;

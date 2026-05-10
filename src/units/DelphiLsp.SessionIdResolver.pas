@@ -97,7 +97,8 @@ uses
   System.IOUtils,
   System.JSON,
   DelphiLsp.Logging,
-  DelphiLsp.Paths;
+  DelphiLsp.Paths,
+  DelphiLsp.JsonUtils;
 
 function FilterUnsubstitutedPlaceholder(const Value: string): string;
 begin
@@ -172,7 +173,8 @@ end;
 function ReadSessionIdFromHookFile(const ClaudePidDir, Key: string): string;
 var
   Path, Content: string;
-  Root, IdVal: TJSONValue;
+  Obj: TJSONObject;
+  IdVal: TJSONValue;
 begin
   Result := '';
   if (ClaudePidDir = '') or (Key = '') then Exit;
@@ -187,23 +189,14 @@ begin
       Exit;
     end;
   end;
-  Root := nil;
+  Obj := TryParseJsonObject(Content);
+  if Obj = nil then Exit;
   try
-    try
-      Root := TJSONObject.ParseJSONValue(Content);
-    except
-      on E: Exception do
-      begin
-        Diag('Hook-file parse failed: ' + E.Message);
-        Exit;
-      end;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    IdVal := TJSONObject(Root).GetValue('session_id');
+    IdVal := Obj.GetValue('session_id');
     if (IdVal <> nil) and (IdVal is TJSONString) then
       Result := TJSONString(IdVal).Value;
   finally
-    Root.Free;
+    Obj.Free;
   end;
 end;
 
@@ -216,7 +209,8 @@ var
   SR: TSearchRec;
   BestSid: string;
   BestAge: TDateTime;
-  Root, IdVal, CwdVal: TJSONValue;
+  Obj: TJSONObject;
+  IdVal, CwdVal: TJSONValue;
 begin
   Result := '';
   if (ClaudePidDir = '') or not DirectoryExists(ClaudePidDir) then Exit;
@@ -240,16 +234,11 @@ begin
           Continue;
         end;
       end;
-      Root := nil;
+      Obj := TryParseJsonObject(Content);
+      if Obj = nil then Continue;
       try
-        try
-          Root := TJSONObject.ParseJSONValue(Content);
-        except
-          Continue;
-        end;
-        if not (Root is TJSONObject) then Continue;
-        IdVal := TJSONObject(Root).GetValue('session_id');
-        CwdVal := TJSONObject(Root).GetValue('cwd');
+        IdVal := Obj.GetValue('session_id');
+        CwdVal := Obj.GetValue('cwd');
         if (IdVal = nil) or (CwdVal = nil) then Continue;
         EntrySid := IdVal.Value;
         EntryCwd := CwdVal.Value;
@@ -260,7 +249,7 @@ begin
           BestAge := SR.TimeStamp;
         end;
       finally
-        Root.Free;
+        Obj.Free;
       end;
     until FindNext(SR) <> 0;
   finally

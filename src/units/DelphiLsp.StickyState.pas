@@ -42,7 +42,8 @@ uses
   System.JSON,
   System.Hash,
   DelphiLsp.Paths,
-  DelphiLsp.Logging;
+  DelphiLsp.Logging,
+  DelphiLsp.JsonUtils;
 
 function BuildStickyStatePath(const PluginDataBase, SessionId: string): string;
 begin
@@ -54,7 +55,8 @@ end;
 function ReadStickyForCwd(const StatePath, Cwd: string): string;
 var
   Content, CwdHash, Path: string;
-  Root, EntryVal, PathVal: TJSONValue;
+  Root: TJSONObject;
+  EntryVal, PathVal: TJSONValue;
   Entry: TJSONObject;
 begin
   Result := '';
@@ -69,19 +71,10 @@ begin
     end;
   end;
   CwdHash := THashSHA2.GetHashString(NormalizeCwd(Cwd), SHA256);
-  Root := nil;
+  Root := TryParseJsonObject(Content);
+  if Root = nil then Exit;
   try
-    try
-      Root := TJSONObject.ParseJSONValue(Content);
-    except
-      on E: Exception do
-      begin
-        Diag('Sticky parse failed: ' + E.Message);
-        Exit;
-      end;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    EntryVal := TJSONObject(Root).GetValue(CwdHash);
+    EntryVal := Root.GetValue(CwdHash);
     if not (EntryVal is TJSONObject) then Exit;
     Entry := TJSONObject(EntryVal);
     PathVal := Entry.GetValue('settingsFile');
@@ -99,7 +92,6 @@ end;
 procedure WriteStickyForCwd(const StatePath, Cwd, SettingsPath: string);
 var
   Root: TJSONObject;
-  ExistingVal: TJSONValue;
   ExistingPair: TJSONPair;
   Entry: TJSONObject;
   CwdHash, Content, Dir, TmpPath, Json: string;
@@ -115,11 +107,7 @@ begin
     begin
       try
         Content := TFile.ReadAllText(StatePath, TEncoding.UTF8);
-        ExistingVal := TJSONObject.ParseJSONValue(Content);
-        if ExistingVal is TJSONObject then
-          Root := TJSONObject(ExistingVal)
-        else if ExistingVal <> nil then
-          ExistingVal.Free;
+        Root := TryParseJsonObject(Content);
       except
         on E: Exception do
           Diag('Sticky read-for-update failed: ' + E.Message);

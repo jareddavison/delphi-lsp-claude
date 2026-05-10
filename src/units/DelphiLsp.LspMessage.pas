@@ -112,54 +112,37 @@ implementation
 uses
   System.SysUtils,
   System.Generics.Collections,
-  DelphiLsp.Logging;
+  DelphiLsp.Logging,
+  DelphiLsp.JsonUtils;
 
 function GetMessageMethod(const Json: string): string;
 var
-  Root: TJSONValue;
   Obj: TJSONObject;
   MethodVal: TJSONValue;
 begin
   Result := '';
-  Root := nil;
+  Obj := TryParseJsonObject(Json);
+  if Obj = nil then Exit;
   try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      on E: Exception do
-      begin
-        Diag('JSON parse failed: ' + E.Message);
-        Exit;
-      end;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := Root as TJSONObject;
     MethodVal := Obj.GetValue('method');
     if (MethodVal <> nil) and (MethodVal is TJSONString) then
       Result := TJSONString(MethodVal).Value;
   finally
-    Root.Free;
+    Obj.Free;
   end;
 end;
 
 function InjectInitOptions(const Json: string;
   const ServerType: string; AgentCount: Integer): string;
 var
-  Root: TJSONValue;
   Obj, ParamsObj, InitOpts: TJSONObject;
   ParamsVal, InitVal, MethodVal: TJSONValue;
   ExistingPair: TJSONPair;
 begin
   Result := Json;
-  Root := nil;
+  Obj := TryParseJsonObject(Json);
+  if Obj = nil then Exit;
   try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := Root as TJSONObject;
     MethodVal := Obj.GetValue('method');
     if (MethodVal = nil) or not (MethodVal is TJSONString) or
        (TJSONString(MethodVal).Value <> 'initialize') then Exit;
@@ -191,7 +174,7 @@ begin
     Diag(Format('Injected initializationOptions serverType=%s agentCount=%d',
       [ServerType, AgentCount]));
   finally
-    Root.Free;
+    Obj.Free;
   end;
 end;
 
@@ -238,26 +221,19 @@ end;
 
 function RewriteInitId(const Json: string; NewId: Integer): string;
 var
-  Root: TJSONValue;
   Obj: TJSONObject;
   ExistingPair: TJSONPair;
 begin
   Result := Json;
-  Root := nil;
+  Obj := TryParseJsonObject(Json);
+  if Obj = nil then Exit;
   try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := TJSONObject(Root);
     ExistingPair := Obj.RemovePair('id');
     if ExistingPair <> nil then ExistingPair.Free;
     Obj.AddPair('id', TJSONNumber.Create(NewId));
     Result := Obj.ToJSON;
   finally
-    Root.Free;
+    Obj.Free;
   end;
 end;
 
@@ -326,22 +302,15 @@ end;
 
 function ExtractInitializeProcessId(const Json: string): DWORD;
 var
-  Root: TJSONValue;
   Obj, Params: TJSONObject;
   ParamsVal, MethodVal, PidVal: TJSONValue;
   PidStr: string;
   Tmp: Int64;
 begin
   Result := 0;
-  Root := nil;
+  Obj := TryParseJsonObject(Json);
+  if Obj = nil then Exit;
   try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := TJSONObject(Root);
     MethodVal := Obj.GetValue('method');
     if (MethodVal = nil) or not (MethodVal is TJSONString) or
        (TJSONString(MethodVal).Value <> 'initialize') then Exit;
@@ -355,14 +324,13 @@ begin
     if TryStrToInt64(PidStr, Tmp) and (Tmp > 0) and (Tmp <= High(DWORD)) then
       Result := DWORD(Tmp);
   finally
-    Root.Free;
+    Obj.Free;
   end;
 end;
 
 function TryParseDidOpen(const Json: string; out Uri: string;
   out Doc: TOpenDocument): Boolean;
 var
-  Root: TJSONValue;
   Obj, Params, TextDoc: TJSONObject;
   ParamsVal, TextDocVal, V: TJSONValue;
 begin
@@ -371,15 +339,9 @@ begin
   Doc.LanguageId := '';
   Doc.Version := 0;
   Doc.Text := '';
-  Root := nil;
+  Obj := TryParseJsonObject(Json);
+  if Obj = nil then Exit;
   try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := TJSONObject(Root);
     ParamsVal := Obj.GetValue('params');
     if not (ParamsVal is TJSONObject) then Exit;
     Params := TJSONObject(ParamsVal);
@@ -400,28 +362,21 @@ begin
     Doc.Text := V.Value;
     Result := True;
   finally
-    Root.Free;
+    Obj.Free;
   end;
 end;
 
 function TryExtractTextDocumentUri(const Json: string;
   out Uri: string): Boolean;
 var
-  Root: TJSONValue;
   Obj, Params, TextDoc: TJSONObject;
   ParamsVal, TextDocVal, UriVal: TJSONValue;
 begin
   Result := False;
   Uri := '';
-  Root := nil;
+  Obj := TryParseJsonObject(Json);
+  if Obj = nil then Exit;
   try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := TJSONObject(Root);
     ParamsVal := Obj.GetValue('params');
     if not (ParamsVal is TJSONObject) then Exit;
     Params := TJSONObject(ParamsVal);
@@ -433,38 +388,30 @@ begin
     Uri := UriVal.Value;
     Result := True;
   finally
-    Root.Free;
+    Obj.Free;
   end;
 end;
 
 function ExtractMessageId(const Json: string): string;
 var
-  Root: TJSONValue;
   Obj: TJSONObject;
   IdVal: TJSONValue;
 begin
   Result := '';
-  Root := nil;
+  Obj := TryParseJsonObject(Json);
+  if Obj = nil then Exit;
   try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := TJSONObject(Root);
     IdVal := Obj.GetValue('id');
     if IdVal = nil then Exit;
     Result := IdVal.Value;
   finally
-    Root.Free;
+    Obj.Free;
   end;
 end;
 
 function TryApplyDidChange(const Json: string;
   var Doc: TOpenDocument): Boolean;
 var
-  Root: TJSONValue;
   Obj, Params, TextDoc, ChangeObj: TJSONObject;
   ParamsVal, TextDocVal, UriVal, VerVal: TJSONValue;
   Changes: TJSONArray;
@@ -472,15 +419,9 @@ var
   I: Integer;
 begin
   Result := False;
-  Root := nil;
+  Obj := TryParseJsonObject(Json);
+  if Obj = nil then Exit;
   try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := TJSONObject(Root);
     ParamsVal := Obj.GetValue('params');
     if not (ParamsVal is TJSONObject) then Exit;
     Params := TJSONObject(ParamsVal);
@@ -507,7 +448,7 @@ begin
     end;
     Result := True;
   finally
-    Root.Free;
+    Obj.Free;
   end;
 end;
 

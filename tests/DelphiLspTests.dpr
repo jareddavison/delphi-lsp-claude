@@ -39,6 +39,7 @@ uses
   DelphiLsp.SentinelWatcher in '..\src\units\DelphiLsp.SentinelWatcher.pas',
   DelphiLsp.SessionRegistry in '..\src\units\DelphiLsp.SessionRegistry.pas',
   DelphiLsp.Env in '..\src\units\DelphiLsp.Env.pas',
+  DelphiLsp.JsonUtils in '..\src\units\DelphiLsp.JsonUtils.pas',
   DelphiLsp.XmlDecodeTests in 'DelphiLsp.XmlDecodeTests.pas',
   DelphiLsp.PathsTests in 'DelphiLsp.PathsTests.pas',
   DelphiLsp.WalkersTests in 'DelphiLsp.WalkersTests.pas',
@@ -61,7 +62,8 @@ uses
   DelphiLsp.LspSessionTests in 'DelphiLsp.LspSessionTests.pas',
   DelphiLsp.SentinelWatcherTests in 'DelphiLsp.SentinelWatcherTests.pas',
   DelphiLsp.SessionRegistryTests in 'DelphiLsp.SessionRegistryTests.pas',
-  DelphiLsp.EnvTests in 'DelphiLsp.EnvTests.pas';
+  DelphiLsp.EnvTests in 'DelphiLsp.EnvTests.pas',
+  DelphiLsp.JsonUtilsTests in 'DelphiLsp.JsonUtilsTests.pas';
 
 var
   Runner: ITestRunner;

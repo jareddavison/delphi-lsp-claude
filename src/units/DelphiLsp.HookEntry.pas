@@ -74,63 +74,50 @@ uses
   DelphiLsp.DprojParse,
   DelphiLsp.PluginData,
   DelphiLsp.IO,
-  DelphiLsp.StickyState;
+  DelphiLsp.StickyState,
+  DelphiLsp.JsonUtils;
 
 function ParseSessionStartPayload(const Json: string;
   out SessionId, Cwd: string): Boolean;
 var
-  Root: TJSONValue;
   Obj: TJSONObject;
   IdVal, CwdVal: TJSONValue;
 begin
   SessionId := '';
   Cwd := '';
   Result := False;
-  Root := nil;
+  Obj := TryParseJsonObject(Json);
+  if Obj = nil then Exit;
   try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := TJSONObject(Root);
     IdVal := Obj.GetValue('session_id');
     CwdVal := Obj.GetValue('cwd');
     if IdVal <> nil then SessionId := IdVal.Value;
     if CwdVal <> nil then Cwd := CwdVal.Value;
     Result := True;
   finally
-    Root.Free;
+    Obj.Free;
   end;
 end;
 
 function ParseSessionEndPayload(const Json: string;
   out SessionId, Reason: string): Boolean;
 var
-  Root: TJSONValue;
   Obj: TJSONObject;
   IdVal, ReasonVal: TJSONValue;
 begin
   SessionId := '';
   Reason := '';
   Result := False;
-  Root := nil;
+  Obj := TryParseJsonObject(Json);
+  if Obj = nil then Exit;
   try
-    try
-      Root := TJSONObject.ParseJSONValue(Json);
-    except
-      Exit;
-    end;
-    if not (Root is TJSONObject) then Exit;
-    Obj := TJSONObject(Root);
     IdVal := Obj.GetValue('session_id');
     ReasonVal := Obj.GetValue('reason');
     if IdVal <> nil then SessionId := IdVal.Value;
     if ReasonVal <> nil then Reason := ReasonVal.Value;
     Result := True;
   finally
-    Root.Free;
+    Obj.Free;
   end;
 end;
 
@@ -369,7 +356,6 @@ var
   Ancestors: TArray<DWORD>;
   AncIdx: Integer;
   Removed: Integer;
-  FileRoot: TJSONValue;
   Obj: TJSONObject;
   IdVal: TJSONValue;
   Parsed: Boolean;
@@ -418,28 +404,20 @@ begin
     FileSessionId := '';
     try
       Content := TFile.ReadAllText(FullPath, TEncoding.UTF8);
-      FileRoot := nil;
-      try
-        try
-          FileRoot := TJSONObject.ParseJSONValue(Content);
-        except
-          Continue;
-        end;
-        if FileRoot is TJSONObject then
-        begin
-          Obj := TJSONObject(FileRoot);
-          IdVal := Obj.GetValue('session_id');
-          if IdVal <> nil then FileSessionId := IdVal.Value;
-        end;
-      finally
-        FileRoot.Free;
-      end;
     except
       on E: Exception do
       begin
         Diag('SessionEnd ancestor-file read failed: ' + E.Message);
         Continue;
       end;
+    end;
+    Obj := TryParseJsonObject(Content);
+    if Obj <> nil then
+    try
+      IdVal := Obj.GetValue('session_id');
+      if IdVal <> nil then FileSessionId := IdVal.Value;
+    finally
+      Obj.Free;
     end;
     if FileSessionId <> SessionId then Continue;
     if DeleteFile(PChar(FullPath)) then
