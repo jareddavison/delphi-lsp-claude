@@ -82,6 +82,16 @@ type
     [Test] procedure ExtractMessageId_NegativeId_ReturnsNegativeString;
     [Test] procedure ExtractMessageId_NoIdField_ReturnsEmpty;
     [Test] procedure ExtractMessageId_InvalidJson_ReturnsEmpty;
+
+    // TryBuildSyntheticDidOpen
+    [Test] procedure SynthDidOpen_PasFile_ReturnsTrueAndContents;
+    [Test] procedure SynthDidOpen_DprFile_ReturnsTrue;
+    [Test] procedure SynthDidOpen_DpkFile_ReturnsTrue;
+    [Test] procedure SynthDidOpen_IncFile_ReturnsTrue;
+    [Test] procedure SynthDidOpen_NonPascalExt_ReturnsFalse;
+    [Test] procedure SynthDidOpen_NonExistentFile_ReturnsFalse;
+    [Test] procedure SynthDidOpen_InvalidUri_ReturnsFalse;
+    [Test] procedure SynthDidOpen_JsonRoundtripsBackToOpenable;
   end;
 
 implementation
@@ -89,6 +99,7 @@ implementation
 uses
   System.JSON,
   System.SysUtils,
+  System.IOUtils,
   DelphiLsp.LspMessage;
 
 { GetMessageMethod }
@@ -636,6 +647,137 @@ end;
 procedure TLspMessageTests.ExtractMessageId_InvalidJson_ReturnsEmpty;
 begin
   Assert.AreEqual('', ExtractMessageId('{ broken'));
+end;
+
+{ TryBuildSyntheticDidOpen — uses real disk fixtures via TPath.GetTempPath
+  since the helper does file I/O. Each test makes its own scratch file. }
+
+function MakeScratchFile(const Ext, Content: string;
+  out Path, Uri: string): Boolean;
+begin
+  Path := TPath.Combine(TPath.GetTempPath,
+    'synthdidopen-' +
+    TGUID.NewGuid.ToString.Replace('{', '').Replace('}', '') + Ext);
+  TFile.WriteAllText(Path, Content, TEncoding.UTF8);
+  Uri := 'file:///' + StringReplace(Path, '\', '/', [rfReplaceAll]);
+  Result := True;
+end;
+
+procedure TLspMessageTests.SynthDidOpen_PasFile_ReturnsTrueAndContents;
+var
+  Path, Uri, Json: string;
+  Doc: TOpenDocument;
+begin
+  MakeScratchFile('.pas', 'unit Foo;'#13#10'interface'#13#10'end.', Path, Uri);
+  try
+    Assert.IsTrue(TryBuildSyntheticDidOpen(Uri, 1, Doc, Json));
+    Assert.AreEqual('objectpascal', Doc.LanguageId);
+    Assert.IsTrue(Doc.Version = 1);
+    Assert.AreEqual('unit Foo;'#13#10'interface'#13#10'end.', Doc.Text);
+    Assert.IsTrue(Pos('"method":"textDocument/didOpen"', Json) > 0,
+      'JSON should be a didOpen notification');
+    Assert.IsTrue(Pos('"languageId":"objectpascal"', Json) > 0);
+  finally
+    TFile.Delete(Path);
+  end;
+end;
+
+procedure TLspMessageTests.SynthDidOpen_DprFile_ReturnsTrue;
+var
+  Path, Uri, Json: string;
+  Doc: TOpenDocument;
+begin
+  MakeScratchFile('.dpr', 'program X; begin end.', Path, Uri);
+  try
+    Assert.IsTrue(TryBuildSyntheticDidOpen(Uri, 1, Doc, Json));
+    Assert.AreEqual('objectpascal', Doc.LanguageId);
+  finally
+    TFile.Delete(Path);
+  end;
+end;
+
+procedure TLspMessageTests.SynthDidOpen_DpkFile_ReturnsTrue;
+var
+  Path, Uri, Json: string;
+  Doc: TOpenDocument;
+begin
+  MakeScratchFile('.dpk', 'package P; end.', Path, Uri);
+  try
+    Assert.IsTrue(TryBuildSyntheticDidOpen(Uri, 1, Doc, Json));
+  finally
+    TFile.Delete(Path);
+  end;
+end;
+
+procedure TLspMessageTests.SynthDidOpen_IncFile_ReturnsTrue;
+var
+  Path, Uri, Json: string;
+  Doc: TOpenDocument;
+begin
+  MakeScratchFile('.inc', '{$DEFINE FOO}', Path, Uri);
+  try
+    Assert.IsTrue(TryBuildSyntheticDidOpen(Uri, 1, Doc, Json));
+  finally
+    TFile.Delete(Path);
+  end;
+end;
+
+procedure TLspMessageTests.SynthDidOpen_NonPascalExt_ReturnsFalse;
+var
+  Path, Uri, Json: string;
+  Doc: TOpenDocument;
+begin
+  // Don't read random non-Pascal files (e.g. .json / .txt) — the
+  // shim only auto-opens what the LSP server understands.
+  MakeScratchFile('.json', '{"k":"v"}', Path, Uri);
+  try
+    Assert.IsFalse(TryBuildSyntheticDidOpen(Uri, 1, Doc, Json));
+    Assert.AreEqual('', Doc.Text);
+    Assert.AreEqual('', Json);
+  finally
+    TFile.Delete(Path);
+  end;
+end;
+
+procedure TLspMessageTests.SynthDidOpen_NonExistentFile_ReturnsFalse;
+var
+  Json: string;
+  Doc: TOpenDocument;
+begin
+  Assert.IsFalse(TryBuildSyntheticDidOpen(
+    'file:///D:/this/path/does/not/exist.pas', 1, Doc, Json));
+end;
+
+procedure TLspMessageTests.SynthDidOpen_InvalidUri_ReturnsFalse;
+var
+  Json: string;
+  Doc: TOpenDocument;
+begin
+  // Anything that doesn't decode to a local file path -> reject.
+  Assert.IsFalse(TryBuildSyntheticDidOpen('http://example.com/foo.pas',
+    1, Doc, Json));
+  Assert.IsFalse(TryBuildSyntheticDidOpen('not a uri', 1, Doc, Json));
+  Assert.IsFalse(TryBuildSyntheticDidOpen('', 1, Doc, Json));
+end;
+
+procedure TLspMessageTests.SynthDidOpen_JsonRoundtripsBackToOpenable;
+var
+  Path, Uri, Json, ParsedUri: string;
+  Doc, Parsed: TOpenDocument;
+begin
+  // Sanity: the JSON we emit should round-trip through TryParseDidOpen.
+  // Catches a regression where MakeDidOpenJson and TryParseDidOpen drift.
+  MakeScratchFile('.pas', 'unit Bar;'#13#10'interface'#13#10'end.', Path, Uri);
+  try
+    Assert.IsTrue(TryBuildSyntheticDidOpen(Uri, 7, Doc, Json));
+    Assert.IsTrue(TryParseDidOpen(Json, ParsedUri, Parsed));
+    Assert.AreEqual(Uri, ParsedUri);
+    Assert.AreEqual(Doc.LanguageId, Parsed.LanguageId);
+    Assert.IsTrue(Parsed.Version = Doc.Version);
+    Assert.AreEqual(Doc.Text, Parsed.Text);
+  finally
+    TFile.Delete(Path);
+  end;
 end;
 
 initialization

@@ -107,13 +107,28 @@ function TryApplyDidChange(const Json: string;
 // replayed-initialize response should be dropped.
 function ExtractMessageId(const Json: string): string;
 
+// Build a synthetic textDocument/didOpen for a file the shim has never
+// seen a real didOpen for. Resolves Uri to a local path, validates the
+// extension (.pas/.dpr/.dpk/.inc), reads the current disk content, and
+// returns the assembled JSON + the populated TOpenDocument so the
+// caller can seed its FOpenDocs cache.
+//
+// Used when Claude Code's Edit/Read tooling sends a didChange without
+// having first sent a didOpen — DelphiLSP needs an in-memory baseline
+// or it skips real diagnostics. Returns False (and leaves outs zeroed)
+// when the URI doesn't map to a readable Pascal file.
+function TryBuildSyntheticDidOpen(const Uri: string; Version: Integer;
+  out Doc: TOpenDocument; out Json: string): Boolean;
+
 implementation
 
 uses
   System.SysUtils,
   System.Generics.Collections,
   DelphiLsp.Logging,
-  DelphiLsp.JsonUtils;
+  DelphiLsp.JsonUtils,
+  DelphiLsp.Paths,
+  DelphiLsp.IO;
 
 function GetMessageMethod(const Json: string): string;
 var
@@ -407,6 +422,28 @@ begin
   finally
     Obj.Free;
   end;
+end;
+
+function TryBuildSyntheticDidOpen(const Uri: string; Version: Integer;
+  out Doc: TOpenDocument; out Json: string): Boolean;
+var
+  Path, Ext: string;
+begin
+  Result := False;
+  Doc.LanguageId := '';
+  Doc.Version := 0;
+  Doc.Text := '';
+  Json := '';
+  Path := FileUriToPath(Uri);
+  if Path = '' then Exit;
+  Ext := LowerCase(ExtractFileExt(Path));
+  if (Ext <> '.pas') and (Ext <> '.dpr') and
+     (Ext <> '.dpk') and (Ext <> '.inc') then Exit;
+  if not TryReadAllText(Path, '', Doc.Text) then Exit;
+  Doc.LanguageId := 'objectpascal';
+  Doc.Version := Version;
+  Json := MakeDidOpenJson(Uri, Doc);
+  Result := True;
 end;
 
 function TryApplyDidChange(const Json: string;

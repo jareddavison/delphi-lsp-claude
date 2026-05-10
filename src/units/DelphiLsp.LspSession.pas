@@ -182,11 +182,21 @@ end;
 
 procedure TChildReaderThread.Execute;
 var
-  Json: string;
+  Json, Method: string;
 begin
   while not Terminated do
   begin
     if not FFromChild.ReadMessage(Json) then Break;
+    Method := GetMessageMethod(Json);
+    if Method <> '' then
+    begin
+      DiagVerbose('reader<-child: method=' + Method +
+                  ' len=' + IntToStr(Length(Json)));
+      if Method = 'textDocument/publishDiagnostics' then
+        DiagVerbose('  body=' + Json);
+    end
+    else
+      DiagVerbose('reader<-child: response len=' + IntToStr(Length(Json)));
     if ShouldDrop(Json) then Continue;
     if not FToClient.WriteMessage(Json) then Break;
   end;
@@ -364,7 +374,7 @@ end;
 procedure TLspSession.TrackOutgoingMessageLocked(const Json: string;
   const Method: string);
 var
-  Uri: string;
+  Uri, SynthDidOpenJson: string;
   Doc: TOpenDocument;
 begin
   if (Method = 'initialize') and (FCachedInitJson = '') then
@@ -382,6 +392,7 @@ begin
 
   if Method = 'textDocument/didOpen' then
   begin
+    DiagVerbose('didOpen body=' + Json);
     if not TryParseDidOpen(Json, Uri, Doc) then Exit;
     FOpenDocs.AddOrSetValue(Uri, Doc);
     Diag(Format('didOpen tracked: %s (lang=%s, ver=%d, len=%d)',
@@ -389,14 +400,34 @@ begin
   end
   else if Method = 'textDocument/didChange' then
   begin
+    DiagVerbose('didChange body=' + Json);
     if not TryExtractTextDocumentUri(Json, Uri) then Exit;
     if not FOpenDocs.TryGetValue(Uri, Doc) then
     begin
-      Diag('didChange for untracked document: ' + Uri);
-      Exit;
+      // Auto-didOpen: Claude Code's Edit/Read tooling drives didChange
+      // without first sending didOpen. DelphiLSP needs a baseline or it
+      // returns empty diagnostics. Synthesize a didOpen by reading the
+      // file from disk, forward it to the child before the actual
+      // didChange continues.
+      if TryBuildSyntheticDidOpen(Uri, 1, Doc, SynthDidOpenJson) then
+      begin
+        WriteRawLocked(SynthDidOpenJson);
+        FOpenDocs.AddOrSetValue(Uri, Doc);
+        Diag(Format('Auto-didOpen synthesized: %s (len=%d)',
+          [Uri, Length(Doc.Text)]));
+      end
+      else
+      begin
+        Diag('didChange for untracked document: ' + Uri);
+        Exit;
+      end;
     end;
     if TryApplyDidChange(Json, Doc) then
+    begin
       FOpenDocs.AddOrSetValue(Uri, Doc);
+      DiagVerbose(Format('didChange tracked: %s (ver=%d, len=%d)',
+        [Uri, Doc.Version, Length(Doc.Text)]));
+    end;
   end
   else if Method = 'textDocument/didClose' then
   begin

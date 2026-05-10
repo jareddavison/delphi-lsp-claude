@@ -22,6 +22,15 @@ procedure SetLogPath(const Path: string);
 // Append a line to the log file (timestamped). No-op when no log path is set.
 procedure Diag(const Msg: string);
 
+// Verbose-only Diag. Calls Diag iff verbose mode is enabled (set via
+// SetVerbose; the shim wires this up at startup from DELPHI_LSP_VERBOSE).
+// Used for high-volume per-message body dumps that are useful for
+// debugging but too noisy to leave on by default.
+procedure DiagVerbose(const Msg: string);
+
+// Toggle verbose mode. Default off.
+procedure SetVerbose(Enabled: Boolean);
+
 implementation
 
 uses
@@ -29,10 +38,16 @@ uses
 
 var
   LogPath: string = '';
+  Verbose: Boolean = False;
 
 procedure SetLogPath(const Path: string);
 begin
   LogPath := Path;
+end;
+
+procedure SetVerbose(Enabled: Boolean);
+begin
+  Verbose := Enabled;
 end;
 
 procedure Diag(const Msg: string);
@@ -53,6 +68,11 @@ begin
   except
     // best effort: silently swallow disk errors so logging can never crash the shim
   end;
+end;
+
+procedure DiagVerbose(const Msg: string);
+begin
+  if Verbose then Diag(Msg);
 end;
 
 end.

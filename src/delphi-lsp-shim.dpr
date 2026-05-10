@@ -26,6 +26,8 @@
 //   DELPHI_LSP_AGENT_COUNT  - 1 or 2 (default: 2)
 //   DELPHI_LSP_SETTINGS     - explicit path to .delphilsp.json (skips discovery)
 //   DELPHI_LSP_SHIM_LOG     - if set, append shim diagnostics to this file
+//   DELPHI_LSP_VERBOSE      - if set, log per-message body dumps and other
+//                             high-volume debug detail (requires SHIM_LOG)
 
 uses
   Winapi.Windows,
@@ -437,6 +439,7 @@ var
   Reg: TSessionRegistration;
 begin
   SetLogPath(GetEnv('DELPHI_LSP_SHIM_LOG', ''));
+  SetVerbose(GetEnv('DELPHI_LSP_VERBOSE', '') <> '');
 
   // Dual-mode binary: when invoked with --hook-session-start, behave as the
   // SessionStart hook (read JSON from stdin, persist correlation files,
