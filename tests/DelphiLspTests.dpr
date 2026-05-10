@@ -36,6 +36,7 @@ uses
   DelphiLsp.SettingsResolver in '..\src\units\DelphiLsp.SettingsResolver.pas',
   DelphiLsp.ActiveProject in '..\src\units\DelphiLsp.ActiveProject.pas',
   DelphiLsp.LspSession in '..\src\units\DelphiLsp.LspSession.pas',
+  DelphiLsp.SentinelWatcher in '..\src\units\DelphiLsp.SentinelWatcher.pas',
   DelphiLsp.XmlDecodeTests in 'DelphiLsp.XmlDecodeTests.pas',
   DelphiLsp.PathsTests in 'DelphiLsp.PathsTests.pas',
   DelphiLsp.WalkersTests in 'DelphiLsp.WalkersTests.pas',
@@ -55,7 +56,8 @@ uses
   DelphiLsp.SentinelsTests in 'DelphiLsp.SentinelsTests.pas',
   DelphiLsp.SettingsResolverTests in 'DelphiLsp.SettingsResolverTests.pas',
   DelphiLsp.ActiveProjectTests in 'DelphiLsp.ActiveProjectTests.pas',
-  DelphiLsp.LspSessionTests in 'DelphiLsp.LspSessionTests.pas';
+  DelphiLsp.LspSessionTests in 'DelphiLsp.LspSessionTests.pas',
+  DelphiLsp.SentinelWatcherTests in 'DelphiLsp.SentinelWatcherTests.pas';
 
 var
   Runner: ITestRunner;

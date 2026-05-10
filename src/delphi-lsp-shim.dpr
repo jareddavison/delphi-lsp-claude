@@ -59,23 +59,8 @@ uses
   DelphiLsp.Sentinels,
   DelphiLsp.SettingsResolver,
   DelphiLsp.ActiveProject,
-  DelphiLsp.LspSession;
-
-type
-  // Watches the per-session sentinel directory for `active.txt`/`reload.flag`
-  // changes (slash commands deposit them) and refires `didChangeConfiguration`
-  // / triggers recycle as appropriate.
-  TSentinelWatcherThread = class(TThread)
-  private
-    FDir: string;
-    FShutdownEvent: TEvent;
-  protected
-    procedure Execute; override;
-  public
-    constructor Create(const ADir: string);
-    destructor Destroy; override;
-    procedure SignalShutdown;
-  end;
+  DelphiLsp.LspSession,
+  DelphiLsp.SentinelWatcher;
 
 var
   GSession: TLspSession;              // session-scoped state (streams, child, open docs, init cache)
@@ -91,34 +76,6 @@ begin
   Result := GetEnvironmentVariable(Name);
   if Result = '' then Result := Default;
 end;
-
-{ Settings file helpers }
-
-function FindSettingsFile(const Root: string): string;
-var
-  Acc: TList<string>;
-begin
-  Result := '';
-  Acc := TList<string>.Create;
-  try
-    CollectFilesByExt(Root, '.delphilsp.json', 0, Acc);
-    if Acc.Count = 0 then Exit;
-    Acc.Sort(TComparer<string>.Construct(
-      function(const A, B: string): Integer
-      var
-        DA, DB: Integer;
-      begin
-        DA := Length(A.Split([PathDelim]));
-        DB := Length(B.Split([PathDelim]));
-        if DA <> DB then Exit(DA - DB);
-        Result := CompareStr(A, B);
-      end));
-    Result := Acc[0];
-  finally
-    Acc.Free;
-  end;
-end;
-
 
 // Replace the active project. Frees the old TActiveProject (which stops
 // its watcher) and constructs a new one with its own watcher and seeded
@@ -402,66 +359,6 @@ begin
   end;
 end;
 
-{ TSentinelWatcherThread }
-
-constructor TSentinelWatcherThread.Create(const ADir: string);
-begin
-  FDir := ADir;
-  FShutdownEvent := TEvent.Create(nil, True, False, '');
-  inherited Create(False);
-end;
-
-destructor TSentinelWatcherThread.Destroy;
-begin
-  FShutdownEvent.Free;
-  inherited;
-end;
-
-procedure TSentinelWatcherThread.SignalShutdown;
-begin
-  FShutdownEvent.SetEvent;
-end;
-
-procedure TSentinelWatcherThread.Execute;
-var
-  ChangeHandle: THandle;
-  Handles: array[0..1] of THandle;
-  WaitResult: DWORD;
-begin
-  if FDir = '' then Exit;
-  ChangeHandle := FindFirstChangeNotification(PChar(FDir), False,
-    FILE_NOTIFY_CHANGE_LAST_WRITE or FILE_NOTIFY_CHANGE_FILE_NAME);
-  if ChangeHandle = INVALID_HANDLE_VALUE then
-  begin
-    Diag('Sentinel watcher: FindFirstChangeNotification failed for ' + FDir);
-    Exit;
-  end;
-  try
-    Handles[0] := ChangeHandle;
-    Handles[1] := FShutdownEvent.Handle;
-    while not Terminated do
-    begin
-      WaitResult := WaitForMultipleObjects(2, @Handles[0], False, INFINITE);
-      if WaitResult = WAIT_OBJECT_0 then
-      begin
-        try
-          ReadAndApplySentinel;
-          ReadAndApplyReloadFlag;
-          ReadAndApplyShimReloadFlag;
-        except
-          on E: Exception do Diag('Sentinel callback error: ' + E.Message);
-        end;
-        FindNextChangeNotification(ChangeHandle);
-      end
-      else if WaitResult = WAIT_OBJECT_0 + 1 then
-        Break;
-    end;
-  finally
-    FindCloseChangeNotification(ChangeHandle);
-  end;
-  Diag('Sentinel watcher exiting');
-end;
-
 { Hook mode entry points are in DelphiLsp.HookEntry. }
 
 procedure RunProxy;
@@ -699,7 +596,13 @@ begin
 
     if GSessionDir <> '' then
     begin
-      SentinelWatcher := TSentinelWatcherThread.Create(GSessionDir);
+      SentinelWatcher := TSentinelWatcherThread.Create(GSessionDir,
+        procedure
+        begin
+          ReadAndApplySentinel;
+          ReadAndApplyReloadFlag;
+          ReadAndApplyShimReloadFlag;
+        end);
       SentinelWatcher.FreeOnTerminate := False;
     end;
 
