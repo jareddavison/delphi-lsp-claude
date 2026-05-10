@@ -55,7 +55,8 @@ uses
   DelphiLsp.LspWire,
   DelphiLsp.LspPathResolver,
   DelphiLsp.Diagnostics,
-  DelphiLsp.HookEntry;
+  DelphiLsp.HookEntry,
+  DelphiLsp.Sentinels;
 
 type
   TChildReaderThread = class(TThread)
@@ -646,27 +647,10 @@ end;
 
 procedure ReadAndApplySentinel;
 var
-  ContentLines: TStringList;
   Path: string;
 begin
-  if (GActiveSentinelPath = '') or not FileExists(GActiveSentinelPath) then Exit;
-  ContentLines := TStringList.Create;
-  try
-    try
-      ContentLines.LoadFromFile(GActiveSentinelPath, TEncoding.UTF8);
-    except
-      on E: Exception do
-      begin
-        Diag('Sentinel read failed: ' + E.Message);
-        Exit;
-      end;
-    end;
-    if ContentLines.Count = 0 then Exit;
-    Path := Trim(ContentLines[0]);
-    if Path <> '' then SwitchToProject(Path);
-  finally
-    ContentLines.Free;
-  end;
+  if ReadFirstNonEmptyTrimmedLine(GActiveSentinelPath, Path) then
+    SwitchToProject(Path);
 end;
 
 // /delphi-shim-reload writes a sentinel at <session>/shim-reload.flag. Unlike
@@ -675,18 +659,11 @@ end;
 // integration is lazy — the next LSP query after exit spawns a fresh shim
 // with whatever binary is on disk now. Useful during dev after a rebuild.
 procedure ReadAndApplyShimReloadFlag;
-var
-  FlagPath: string;
 begin
   if GSessionDir = '' then Exit;
-  FlagPath := IncludeTrailingPathDelimiter(GSessionDir) + 'shim-reload.flag';
-  if not FileExists(FlagPath) then Exit;
+  if not ConsumeFlagFile(IncludeTrailingPathDelimiter(GSessionDir) +
+                         'shim-reload.flag') then Exit;
   Diag('Shim-reload flag detected — exiting non-zero so restartOnCrash respawns us');
-  try
-    DeleteFile(FlagPath);
-  except
-    on E: Exception do Diag('Shim-reload flag delete failed: ' + E.Message);
-  end;
   // Exit non-zero so Claude Code's LSP integration treats this as a crash and
   // honors restartOnCrash (set in plugin.json). Empirically a clean exit
   // (code 0) leaves Claude Code's LSP runner in a "server is running" stuck
@@ -701,18 +678,11 @@ end;
 // notices, this function is called, the flag is consumed (deleted), and the
 // session recycles its DelphiLSP child.
 procedure ReadAndApplyReloadFlag;
-var
-  FlagPath: string;
 begin
   if GSessionDir = '' then Exit;
-  FlagPath := IncludeTrailingPathDelimiter(GSessionDir) + 'reload.flag';
-  if not FileExists(FlagPath) then Exit;
+  if not ConsumeFlagFile(IncludeTrailingPathDelimiter(GSessionDir) +
+                         'reload.flag') then Exit;
   Diag('Reload flag detected; recycling child');
-  try
-    DeleteFile(FlagPath);
-  except
-    on E: Exception do Diag('Reload flag delete failed: ' + E.Message);
-  end;
   if GSession <> nil then
     GSession.RecycleChild;
 end;
