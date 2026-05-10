@@ -31,6 +31,7 @@ uses
   DelphiLsp.LspWire in '..\src\units\DelphiLsp.LspWire.pas',
   DelphiLsp.LspPathResolver in '..\src\units\DelphiLsp.LspPathResolver.pas',
   DelphiLsp.Diagnostics in '..\src\units\DelphiLsp.Diagnostics.pas',
+  DelphiLsp.HookEntry in '..\src\units\DelphiLsp.HookEntry.pas',
   DelphiLsp.XmlDecodeTests in 'DelphiLsp.XmlDecodeTests.pas',
   DelphiLsp.PathsTests in 'DelphiLsp.PathsTests.pas',
   DelphiLsp.WalkersTests in 'DelphiLsp.WalkersTests.pas',
@@ -45,7 +46,8 @@ uses
   DelphiLsp.GcTests in 'DelphiLsp.GcTests.pas',
   DelphiLsp.LspWireTests in 'DelphiLsp.LspWireTests.pas',
   DelphiLsp.LspPathResolverTests in 'DelphiLsp.LspPathResolverTests.pas',
-  DelphiLsp.DiagnosticsTests in 'DelphiLsp.DiagnosticsTests.pas';
+  DelphiLsp.DiagnosticsTests in 'DelphiLsp.DiagnosticsTests.pas',
+  DelphiLsp.HookEntryTests in 'DelphiLsp.HookEntryTests.pas';
 
 var
   Runner: ITestRunner;
