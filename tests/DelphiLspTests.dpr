@@ -34,6 +34,7 @@ uses
   DelphiLsp.HookEntry in '..\src\units\DelphiLsp.HookEntry.pas',
   DelphiLsp.Sentinels in '..\src\units\DelphiLsp.Sentinels.pas',
   DelphiLsp.SettingsResolver in '..\src\units\DelphiLsp.SettingsResolver.pas',
+  DelphiLsp.ActiveProject in '..\src\units\DelphiLsp.ActiveProject.pas',
   DelphiLsp.XmlDecodeTests in 'DelphiLsp.XmlDecodeTests.pas',
   DelphiLsp.PathsTests in 'DelphiLsp.PathsTests.pas',
   DelphiLsp.WalkersTests in 'DelphiLsp.WalkersTests.pas',
@@ -51,7 +52,8 @@ uses
   DelphiLsp.DiagnosticsTests in 'DelphiLsp.DiagnosticsTests.pas',
   DelphiLsp.HookEntryTests in 'DelphiLsp.HookEntryTests.pas',
   DelphiLsp.SentinelsTests in 'DelphiLsp.SentinelsTests.pas',
-  DelphiLsp.SettingsResolverTests in 'DelphiLsp.SettingsResolverTests.pas';
+  DelphiLsp.SettingsResolverTests in 'DelphiLsp.SettingsResolverTests.pas',
+  DelphiLsp.ActiveProjectTests in 'DelphiLsp.ActiveProjectTests.pas';
 
 var
   Runner: ITestRunner;
