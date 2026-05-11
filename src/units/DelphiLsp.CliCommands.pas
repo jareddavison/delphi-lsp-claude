@@ -55,6 +55,7 @@ uses
   System.Generics.Collections,
   System.Generics.Defaults,
   DelphiLsp.IO,
+  DelphiLsp.Logging,
   DelphiLsp.SessionRegistry,
   DelphiLsp.SessionIdResolver,
   DelphiLsp.Walkers;
@@ -201,8 +202,15 @@ var
   I, LiveCount: Integer;
   Liveness, OwnMarker, OurId: string;
 begin
+  Diag('RunStatusCommand: cwd=' + GetCurrentDir);
   AllSessions := FindShimSessionsForCwd;
+  Diag(Format('RunStatusCommand: FindShimSessionsForCwd returned %d session(s)',
+    [Length(AllSessions)]));
+  for S in AllSessions do
+    Diag(Format('  session pid=%d dir=%s claudeId=%s alive=%s',
+      [S.Pid, S.Dir, S.ClaudeSessionId, BoolToStr(S.Alive, True)]));
   OurId := ResolveCurrentClaudeSessionId;
+  Diag('RunStatusCommand: my claude session id = ' + OurId);
   LiveCount := 0;
   for S in AllSessions do
     if S.Alive then Inc(LiveCount);
@@ -270,13 +278,18 @@ end;
 // Common abort message when the current Claude session id can't be
 // resolved — write-mode handlers refuse to touch other Claude
 // instances' shims.
+//
+// Writes to stdout (not stderr) and leaves ExitCode = 0. The slash
+// command renders via `!` preprocessing, which aborts the entire body
+// on any non-zero exit and discards stderr — so business-rule
+// outcomes like "ambiguous session" must travel via stdout/exit-0 to
+// reach the model.
 procedure AbortAmbiguous(const Op: string);
 begin
-  Writeln(ErrOutput, Format(
+  Writeln(Format(
     'Refusing to %s: could not resolve current Claude Code session id.', [Op]));
-  Writeln(ErrOutput, 'Other Claude Code sessions may have shims in the same workspace');
-  Writeln(ErrOutput, 'and the shim cannot tell which one is yours.');
-  ExitCode := 2;
+  Writeln('Other Claude Code sessions may have shims in the same workspace');
+  Writeln('and the shim cannot tell which one is yours.');
 end;
 
 procedure SignalLiveShims(const FlagName, OkMsg, NoneMsg, OpName: string);
@@ -334,23 +347,27 @@ var
 begin
   if ArgValue = '' then
   begin
-    Writeln(ErrOutput, 'Usage: delphi-lsp-shim.exe --set-project <path-or-name>');
-    ExitCode := 1;
+    Writeln('No project argument provided.');
+    Writeln('Usage: /delphi-project <path-or-name>');
+    Writeln('  - absolute path to a .delphilsp.json');
+    Writeln('  - relative path under cwd');
+    Writeln('  - project name (matches *<name>*.delphilsp.json)');
+    Writeln('');
+    Writeln('Run /delphi-status to list available projects.');
     Exit;
   end;
 
   Resolved := ResolveDelphilspJsonArg(ArgValue, GetCurrentDir);
   if Resolved = '' then
   begin
-    Writeln(ErrOutput, 'Could not resolve to a .delphilsp.json: ' + ArgValue);
-    Writeln(ErrOutput, '');
-    Writeln(ErrOutput, 'Try one of:');
-    Writeln(ErrOutput, '  - absolute path to a .delphilsp.json');
-    Writeln(ErrOutput, '  - relative path to a .delphilsp.json (under cwd)');
-    Writeln(ErrOutput, '  - project name (matches *<name>*.delphilsp.json)');
-    Writeln(ErrOutput, '');
-    Writeln(ErrOutput, 'Run --status to list available projects.');
-    ExitCode := 1;
+    Writeln('Could not resolve to a .delphilsp.json: ' + ArgValue);
+    Writeln('');
+    Writeln('Try one of:');
+    Writeln('  - absolute path to a .delphilsp.json');
+    Writeln('  - relative path to a .delphilsp.json (under cwd)');
+    Writeln('  - project name (matches *<name>*.delphilsp.json)');
+    Writeln('');
+    Writeln('Run /delphi-status to list available projects.');
     Exit;
   end;
 
@@ -391,12 +408,21 @@ var
   Ambiguous: Boolean;
 begin
   Trimmed := Trim(ArgValue);
+  // The slash command surface (/delphi-runtime) is a single entry point;
+  // 'clear' as the argument routes to RunClearRuntimeCommand so the
+  // markdown only needs one `!` invocation.
+  if SameText(Trimmed, 'clear') then
+  begin
+    RunClearRuntimeCommand;
+    Exit;
+  end;
   if Trimmed = '' then
   begin
-    Writeln(ErrOutput, 'Usage: delphi-lsp-shim.exe --set-runtime <bds-version|abs-path>');
-    Writeln(ErrOutput, '  Examples: --set-runtime 37.0');
-    Writeln(ErrOutput, '            --set-runtime "C:\Program Files (x86)\Embarcadero\Studio\37.0\bin\DelphiLSP.exe"');
-    ExitCode := 1;
+    Writeln('No runtime argument provided.');
+    Writeln('Usage:');
+    Writeln('  /delphi-runtime 37.0          (BDS version)');
+    Writeln('  /delphi-runtime <abs-path>    (path to DelphiLSP.exe)');
+    Writeln('  /delphi-runtime clear         (remove override)');
     Exit;
   end;
 

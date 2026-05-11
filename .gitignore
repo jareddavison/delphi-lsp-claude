@@ -28,6 +28,16 @@ __recovery/
 *.delphilsp.json
 *.dproj.local
 
+# Exception: the regression-test fixture's delphilsp.json IS committed,
+# with a __PROJECT_DPR_URL__ placeholder the test substitutes per run.
+!tests/fixtures/**/*.delphilsp.json
+
+# Build artifacts that accumulate when the fixture project gets compiled
+# (e.g., during a manual investigation of a regression-test failure).
+tests/fixtures/**/Win32/
+tests/fixtures/**/Win64/
+tests/fixtures/**/*.exe
+
 # Shim diagnostic logs
 *.log
 

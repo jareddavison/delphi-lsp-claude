@@ -190,8 +190,14 @@ var
   Acc: TList<TShimSession>;
 begin
   Result := nil;
-  if (SessionsRoot = '') or not DirectoryExists(SessionsRoot) then Exit;
+  Diag(Format('FindShimSessionsForCwdAt: root=%s cwd=%s', [SessionsRoot, Cwd]));
+  if (SessionsRoot = '') or not DirectoryExists(SessionsRoot) then
+  begin
+    Diag('FindShimSessionsForCwdAt: root missing or empty - exit');
+    Exit;
+  end;
   TargetCwd := CanonicalizeCwd(Cwd);
+  Diag('FindShimSessionsForCwdAt: target canonical=' + TargetCwd);
   if TargetCwd = '' then Exit;
   Acc := TList<TShimSession>.Create;
   try
@@ -205,8 +211,18 @@ begin
         Dir := IncludeTrailingPathDelimiter(SessionsRoot) + SR.Name;
         if not ReadFirstNonEmptyTrimmedLine(
                  IncludeTrailingPathDelimiter(Dir) + 'workspace.txt',
-                 FirstLine) then Continue;
-        if CanonicalizeCwd(FirstLine) <> TargetCwd then Continue;
+                 FirstLine) then
+        begin
+          Diag('  pid=' + SR.Name + ': no workspace.txt - skip');
+          Continue;
+        end;
+        Diag(Format('  pid=%s workspace=%s canonical=%s',
+          [SR.Name, FirstLine, CanonicalizeCwd(FirstLine)]));
+        if CanonicalizeCwd(FirstLine) <> TargetCwd then
+        begin
+          Diag('  pid=' + SR.Name + ': canonical mismatch - skip');
+          Continue;
+        end;
         S.Pid := Pid;
         S.Dir := Dir;
         S.Alive := IsPidAlive(Pid);
