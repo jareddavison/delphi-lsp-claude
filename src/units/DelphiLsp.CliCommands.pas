@@ -348,12 +348,16 @@ begin
   if ArgValue = '' then
   begin
     Writeln('No project argument provided.');
-    Writeln('Usage: /delphi-project <path-or-name>');
-    Writeln('  - absolute path to a .delphilsp.json');
-    Writeln('  - relative path under cwd');
-    Writeln('  - project name (matches *<name>*.delphilsp.json)');
     Writeln('');
-    Writeln('Run /delphi-status to list available projects.');
+    Writeln('NEXT STEP for an AI agent reading this:');
+    Writeln('  1. Invoke Skill(skill="delphi-lsp:delphi-status") to see available projects.');
+    Writeln('  2. Pick one by basename (e.g. "MyApp" matches "MyApp.delphilsp.json").');
+    Writeln('  3. Re-invoke this command WITH the chosen name:');
+    Writeln('       Skill(skill="delphi-lsp:delphi-project", args="MyApp")');
+    Writeln('');
+    Writeln('DO NOT write code that touches active.txt or any sessions/ files.');
+    Writeln('This shim handles all path resolution, canonicalization, and atomic');
+    Writeln('writes. Just re-invoke this command with the right argument.');
     Exit;
   end;
 
@@ -362,12 +366,13 @@ begin
   begin
     Writeln('Could not resolve to a .delphilsp.json: ' + ArgValue);
     Writeln('');
-    Writeln('Try one of:');
-    Writeln('  - absolute path to a .delphilsp.json');
-    Writeln('  - relative path to a .delphilsp.json (under cwd)');
-    Writeln('  - project name (matches *<name>*.delphilsp.json)');
+    Writeln('NEXT STEP for an AI agent reading this:');
+    Writeln('  1. Invoke Skill(skill="delphi-lsp:delphi-status") to see available projects.');
+    Writeln('  2. Pick one whose basename actually exists in the workspace.');
+    Writeln('  3. Re-invoke this command WITH the chosen name:');
+    Writeln('       Skill(skill="delphi-lsp:delphi-project", args="<basename>")');
     Writeln('');
-    Writeln('Run /delphi-status to list available projects.');
+    Writeln('DO NOT write code that touches active.txt or any sessions/ files.');
     Exit;
   end;
 
@@ -419,10 +424,18 @@ begin
   if Trimmed = '' then
   begin
     Writeln('No runtime argument provided.');
-    Writeln('Usage:');
-    Writeln('  /delphi-runtime 37.0          (BDS version)');
-    Writeln('  /delphi-runtime <abs-path>    (path to DelphiLSP.exe)');
-    Writeln('  /delphi-runtime clear         (remove override)');
+    Writeln('');
+    Writeln('NEXT STEP for an AI agent reading this:');
+    Writeln('  Re-invoke this command with one of these argument values:');
+    Writeln('    Skill(skill="delphi-lsp:delphi-runtime", args="37.0")');
+    Writeln('      - BDS version (registry-resolves to <install>\bin\DelphiLSP.exe)');
+    Writeln('    Skill(skill="delphi-lsp:delphi-runtime", args="<absolute-path-to-DelphiLSP.exe>")');
+    Writeln('      - explicit path');
+    Writeln('    Skill(skill="delphi-lsp:delphi-runtime", args="clear")');
+    Writeln('      - remove existing override');
+    Writeln('');
+    Writeln('DO NOT write code that touches runtime.txt or any sessions/ files.');
+    Writeln('This shim handles all path resolution and atomic writes.');
     Exit;
   end;
 
