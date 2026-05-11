@@ -42,6 +42,7 @@ uses
   System.Generics.Collections,
   System.Generics.Defaults,
   DelphiLsp.ActiveProject in 'units\DelphiLsp.ActiveProject.pas',
+  DelphiLsp.CliCommands in 'units\DelphiLsp.CliCommands.pas',
   DelphiLsp.DelphiInstall in 'units\DelphiLsp.DelphiInstall.pas',
   DelphiLsp.Diagnostics in 'units\DelphiLsp.Diagnostics.pas',
   DelphiLsp.DprojParse in 'units\DelphiLsp.DprojParse.pas',
@@ -487,6 +488,89 @@ begin
     Halt(1); // unreachable
   end;
 
+  // Argv-mode slash-command handlers — each does its work and Halts.
+  // These exist so the slash-command markdown can stay as one-line
+  // shim invocations without any model-generated bash that breaks
+  // unpredictably on different bash flavours.
+  if (ParamCount >= 1) and SameText(ParamStr(1), '--status') then
+  begin
+    try
+      RunStatusCommand;
+    except
+      on E: Exception do
+      begin
+        Writeln(ErrOutput, '--status fatal: ' + E.Message);
+        Halt(1);
+      end;
+    end;
+    Halt(ExitCode);
+  end;
+  if (ParamCount >= 1) and SameText(ParamStr(1), '--shim-reload') then
+  begin
+    try
+      RunShimReloadCommand;
+    except
+      on E: Exception do
+      begin
+        Writeln(ErrOutput, '--shim-reload fatal: ' + E.Message);
+        Halt(1);
+      end;
+    end;
+    Halt(ExitCode);
+  end;
+  if (ParamCount >= 1) and SameText(ParamStr(1), '--reload') then
+  begin
+    try
+      RunReloadCommand;
+    except
+      on E: Exception do
+      begin
+        Writeln(ErrOutput, '--reload fatal: ' + E.Message);
+        Halt(1);
+      end;
+    end;
+    Halt(ExitCode);
+  end;
+  if (ParamCount >= 1) and SameText(ParamStr(1), '--set-project') then
+  begin
+    try
+      RunSetProjectCommand(ParamStr(2));
+    except
+      on E: Exception do
+      begin
+        Writeln(ErrOutput, '--set-project fatal: ' + E.Message);
+        Halt(1);
+      end;
+    end;
+    Halt(ExitCode);
+  end;
+  if (ParamCount >= 1) and SameText(ParamStr(1), '--set-runtime') then
+  begin
+    try
+      RunSetRuntimeCommand(ParamStr(2));
+    except
+      on E: Exception do
+      begin
+        Writeln(ErrOutput, '--set-runtime fatal: ' + E.Message);
+        Halt(1);
+      end;
+    end;
+    Halt(ExitCode);
+  end;
+  if (ParamCount >= 1) and SameText(ParamStr(1), '--clear-runtime') then
+  begin
+    try
+      RunClearRuntimeCommand;
+    except
+      on E: Exception do
+      begin
+        Writeln(ErrOutput, '--clear-runtime fatal: ' + E.Message);
+        Halt(1);
+      end;
+    end;
+    Halt(ExitCode);
+  end;
+
   Diag('--- delphi-lsp-shim starting ---');
   Diag('CWD: ' + GetCurrentDir);
 
@@ -518,7 +602,7 @@ begin
       Diag('GC: skipping (own session .jsonl not found or session id unresolved)');
     InitSettings;
 
-    Reg := RegisterSession;
+    Reg := RegisterSession(GClaudeSessionId);
     GSessionDir := Reg.SessionDir;
     GActiveSentinelPath := Reg.ActiveSentinelPath;
     // If a sentinel was already deposited before our spawn (e.g., the user

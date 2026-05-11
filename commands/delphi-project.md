@@ -3,23 +3,20 @@ description: Switch the active DelphiLSP project context. Invoke when starting w
 argument-hint: <path-to-.delphilsp.json | project-name>
 ---
 
-Switch the active DelphiLSP project to **$ARGUMENTS**.
+Switch the active DelphiLSP project for this Claude Code session's shim.
 
-Resolution order, in this order — pick the first that exists:
+```bash
+"${CLAUDE_PLUGIN_ROOT}/bin/delphi-lsp-shim.exe" --set-project "$ARGUMENTS"
+```
 
-1. If `$ARGUMENTS` ends in `.delphilsp.json` and is an absolute path that exists, use it directly.
-2. If `$ARGUMENTS` is a relative path that resolves to an existing file under the workspace, use that.
-3. Otherwise treat `$ARGUMENTS` as a name and search the workspace recursively for `*$ARGUMENTS*.delphilsp.json` (case-insensitive). Pick the shallowest match.
+Argument resolution (first match wins):
 
-Then:
+1. Absolute path that exists and is a `.delphilsp.json`.
+2. Relative path under the workspace that ends in `.delphilsp.json` and exists.
+3. Name match: strips a trailing `.dproj`/`.dpr`/`.dpk`/`.delphilsp.json` from the argument and searches the workspace for `*<base>*.delphilsp.json`, picks the shallowest match (case-insensitive). So `DemoProj.dproj`, `DemoProj`, and `demoproj.delphilsp.json` all resolve to the same file.
 
-1. Locate the shim's session sentinel directories. Claude Code exports `$CLAUDE_PLUGIN_DATA` to LSP subprocesses but NOT to the bash subprocess running this slash command, so the data dir name (e.g. `delphi-lsp-inline`, `delphi-lsp-some-marketplace`) isn't directly knowable here. Instead, scan candidate roots and match by workspace:
-   - `$HOME/.claude/plugins/data/*/sessions/<PID>/workspace.txt`
-   - `$LOCALAPPDATA/delphi-lsp-claude/sessions/<PID>/workspace.txt` (fallback if CLAUDE_PLUGIN_DATA wasn't available to the shim either)
-2. For each candidate `workspace.txt`, read its first line and compare to the current working directory (resolve symlinks before comparing). Collect every `<PID>` directory whose workspace matches. If none match, tell the user the LSP server isn't running for this workspace yet — they should retry after Claude Code finishes loading the plugin.
-3. For each matching `<PID>` dir, atomically write the resolved `.delphilsp.json` path to `<PID>/active.txt` using a temp-file-then-rename pattern (`printf '%s' "$path" > active.txt.tmp && mv -f active.txt.tmp active.txt`) so the shim never reads a half-written file.
-4. Confirm to the user which `.delphilsp.json` is now active and how many shims received the switch.
+The shim filters to this Claude Code session's shim (`claude-session.txt` match). Concurrent Claude Code sessions in the same workspace can have different active projects without colliding.
 
-If no shim is registered (the sessions dir is missing or has no matching workspace), tell the user that the LSP server isn't running for this workspace yet — once it starts, the shim will pick up `active.txt` automatically if it's already there, but the user should retry the slash command after Claude Code finishes loading the plugin.
+If no shim is running yet, the command stages the resolution for the next spawn — but currently the new shim's settings come from sticky bindings; to make the override stick, kick off an LSP query first to spawn a shim, then re-run `/delphi-project`.
 
-After switching, retry the LSP query that prompted this switch. DelphiLSP needs a moment to re-read the project state (typically <1s for small projects, several seconds for large ones); if the first retry returns empty results, retry once more after a brief pause.
+After switching, retry the LSP query that prompted the switch. The shim's sentinel watcher picks up `active.txt` within a fraction of a second; if the first retry returns empty, give DelphiLSP another second to re-index and retry once more.

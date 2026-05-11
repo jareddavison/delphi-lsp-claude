@@ -45,18 +45,16 @@ uses
   System.SysUtils,
   System.IOUtils,
   DelphiLsp.Logging,
-  DelphiLsp.PluginData;
+  DelphiLsp.PluginData,
+  DelphiLsp.ProcessTree;
 
 const
-  // Available since Vista; not in older Winapi.Windows headers.
-  PROCESS_QUERY_LIMITED_INFORMATION = $1000;
   ByIdPrefix = 'by-id-';
 
 procedure GcOrphanSessions(const SessionsRoot: string; SelfPid: DWORD);
 var
   SR: TSearchRec;
   Pid: UInt32;
-  H: THandle;
   ChildDir: string;
   Removed: Integer;
 begin
@@ -70,15 +68,8 @@ begin
       if (SR.Attr and faDirectory) = 0 then Continue;
       if not TryStrToUInt(SR.Name, Pid) then Continue;
       if Pid = SelfPid then Continue;
-      H := OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, Pid);
-      if H <> 0 then
-      begin
-        CloseHandle(H);
-        Continue;
-      end;
-      // Process gone; if OpenProcess failed for a different reason we'll
-      // still nuke the dir (a permission denial on someone else's PID is
-      // not realistic since the PID came out of our own data root).
+      if IsPidAlive(Pid) then Continue;
+      // Process gone; reap the dir.
       ChildDir := IncludeTrailingPathDelimiter(SessionsRoot) + SR.Name;
       try
         TDirectory.Delete(ChildDir, True);
@@ -130,7 +121,6 @@ var
   FullPath, BaseName, SessionId: string;
   SR: TSearchRec;
   Pid: UInt32;
-  H: THandle;
   Removed: Integer;
 begin
   if (ClaudePidDir = '') or not DirectoryExists(ClaudePidDir) then Exit;
@@ -154,12 +144,7 @@ begin
       end
       else if TryStrToUInt(BaseName, Pid) then
       begin
-        H := OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, Pid);
-        if H <> 0 then
-        begin
-          CloseHandle(H);
-          Continue;
-        end;
+        if IsPidAlive(Pid) then Continue;
         if DeleteFile(PChar(FullPath)) then
           Inc(Removed)
         else

@@ -40,6 +40,7 @@ uses
   DelphiLsp.SessionRegistry in '..\src\units\DelphiLsp.SessionRegistry.pas',
   DelphiLsp.Env in '..\src\units\DelphiLsp.Env.pas',
   DelphiLsp.JsonUtils in '..\src\units\DelphiLsp.JsonUtils.pas',
+  DelphiLsp.CliCommands in '..\src\units\DelphiLsp.CliCommands.pas',
   DelphiLsp.XmlDecodeTests in 'DelphiLsp.XmlDecodeTests.pas',
   DelphiLsp.PathsTests in 'DelphiLsp.PathsTests.pas',
   DelphiLsp.WalkersTests in 'DelphiLsp.WalkersTests.pas',

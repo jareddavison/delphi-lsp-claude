@@ -28,6 +28,12 @@ function GetParentProcessId: DWORD;
 // In practice Claude Code's process tree is 3-5 levels.
 function GetAncestorPids(StartPid: DWORD): TArray<DWORD>;
 
+// True iff a process with this PID currently exists. Uses Win32
+// OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) — available since Vista,
+// works against any user's process (including elevated ones) without
+// needing access rights to its address space.
+function IsPidAlive(Pid: DWORD): Boolean;
+
 implementation
 
 uses
@@ -87,6 +93,20 @@ begin
   finally
     Acc.Free;
   end;
+end;
+
+function IsPidAlive(Pid: DWORD): Boolean;
+const
+  // Available since Vista; not in older Winapi.Windows headers.
+  PROCESS_QUERY_LIMITED_INFORMATION = $1000;
+var
+  H: THandle;
+begin
+  if Pid = 0 then Exit(False);
+  H := OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, Pid);
+  if H = 0 then Exit(False);
+  CloseHandle(H);
+  Result := True;
 end;
 
 end.

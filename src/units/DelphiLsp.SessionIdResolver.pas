@@ -90,16 +90,31 @@ function ResolveSessionIdViaHookFiles(
 function DiscoverSessionIdFromProjectsDir(
   const ProjectsRoot, Cwd: string): string;
 
+// Full resolution chain for the current Claude Code session id. Tries
+// env, argv, ancestor hook-file walk, by-id scan, projects-dir scan —
+// in that order, short-circuiting on first hit. Returns '' if all
+// paths fail.
+//
+// Same logic InitSessionState uses at shim startup; exposed so
+// argv-mode handlers (slash-command CLI) can identify which Claude
+// Code instance invoked them and avoid touching shims that belong to
+// a different concurrent Claude Code session in the same cwd.
+function ResolveCurrentClaudeSessionId: string;
+
 implementation
 
 uses
+  Winapi.Windows,
   System.SysUtils,
   System.IOUtils,
   System.JSON,
+  DelphiLsp.Env,
   DelphiLsp.Logging,
   DelphiLsp.Paths,
   DelphiLsp.JsonUtils,
-  DelphiLsp.IO;
+  DelphiLsp.IO,
+  DelphiLsp.PluginData,
+  DelphiLsp.ProcessTree;
 
 function FilterUnsubstitutedPlaceholder(const Value: string): string;
 begin
@@ -293,6 +308,46 @@ begin
   end
   else
     Diag('Projects-dir scan: no .jsonl in ' + ProjectDir);
+end;
+
+function ResolveCurrentClaudeSessionId: string;
+var
+  EnvRaw, FromEnv, FromArgv, FromAncestor, FromByIdScan, FromProjectsDir: string;
+  PidDir, Cwd: string;
+  Ancestors: TArray<DWORD>;
+  AncId: DWORD;
+  Resolution: TSessionIdResolution;
+begin
+  EnvRaw := GetEnv('CLAUDE_CODE_SESSION_ID', '');
+  FromEnv := FilterUnsubstitutedPlaceholder(EnvRaw);
+  FromArgv := ParseSessionIdFromArgv;
+
+  FromAncestor := '';
+  PidDir := ClaudePidDir(ResolvePluginDataBase);
+  if (FromEnv = '') and (FromArgv = '') then
+  begin
+    Ancestors := GetAncestorPids(GetCurrentProcessId);
+    for AncId in Ancestors do
+    begin
+      FromAncestor := ReadSessionIdFromHookFile(PidDir, IntToStr(AncId));
+      if FromAncestor <> '' then Break;
+    end;
+  end;
+
+  FromByIdScan := '';
+  FromProjectsDir := '';
+  if (FromEnv = '') and (FromArgv = '') and (FromAncestor = '') then
+  begin
+    Cwd := GetCurrentDir;
+    FromByIdScan := ResolveSessionIdViaHookFiles(PidDir, Cwd);
+    if FromByIdScan = '' then
+      FromProjectsDir := DiscoverSessionIdFromProjectsDir(
+        ResolveProjectsRoot, Cwd);
+  end;
+
+  Resolution := ResolveSessionId(
+    FromEnv, FromArgv, FromAncestor, FromByIdScan, FromProjectsDir);
+  Result := Resolution.SessionId;
 end;
 
 end.

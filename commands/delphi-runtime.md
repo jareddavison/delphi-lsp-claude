@@ -3,24 +3,22 @@ description: Override which DelphiLSP.exe the shim spawns. By default the shim p
 argument-hint: <bds-version | path-to-DelphiLSP.exe | clear>
 ---
 
-Set or clear the per-shim DelphiLSP runtime override to **$ARGUMENTS**.
+Set or clear the DelphiLSP runtime override for this Claude Code session's shim.
 
-1. Compute the workspace key for matching: bash `pwd -W` translated `/` to `\` so it matches the shim's `workspace.txt`.
+If the argument is the literal `clear` (case-insensitive):
 
-2. Scan candidate session-registration roots:
-   - `$HOME/.claude/plugins/data/*/sessions/*/workspace.txt`
-   - `$LOCALAPPDATA/delphi-lsp-claude/sessions/*/workspace.txt`
+```bash
+"${CLAUDE_PLUGIN_ROOT}/bin/delphi-lsp-shim.exe" --clear-runtime
+```
 
-3. For each `workspace.txt`, read the first line (strip UTF-8 BOM with `sed -e '1s/^\xef\xbb\xbf//'`). If it equals the workspace key, the directory's basename is a shim PID. Verify the PID is live via `tasklist //FI "PID eq <pid>"`. Skip dead PIDs.
+Otherwise:
 
-4. Interpret `$ARGUMENTS`:
-   - Literal `clear` (case-insensitive): delete `<dir>/runtime.txt` from each matching shim dir.
-   - Anything else: write `$ARGUMENTS` to `<dir>/runtime.txt` atomically (`printf '%s' "$arg" > runtime.txt.tmp && mv -f runtime.txt.tmp runtime.txt`). The shim accepts either a BDS version like `37.0` (looked up in the registry) or an absolute path to a `DelphiLSP.exe` (must contain `\` or `/` or end in `.exe`).
+```bash
+"${CLAUDE_PLUGIN_ROOT}/bin/delphi-lsp-shim.exe" --set-runtime "$ARGUMENTS"
+```
 
-5. Write `<dir>/reload.flag` (atomically as above) to trigger a child recycle, so the new DelphiLSP.exe is spawned immediately. Without the recycle the override would only take effect on the next time the child died for some other reason.
+The argument is either a BDS version like `37.0` (registry-resolved to that install's `bin\DelphiLSP.exe`) or an absolute path to a specific `DelphiLSP.exe`. After writing `runtime.txt`, the shim auto-triggers a child recycle so the new DelphiLSP is in effect immediately.
 
-6. Confirm to the user: the override applied (or cleared), how many shims received it, and which DelphiLSP.exe the shim is now running. The shim writes the resolved path + source ("DELPHI_LSP_EXE", "runtime.txt:version=37.0", "hinted by ...", "highest installed (BDS X.Y)", "PATH") to its log on every spawn - read the most recent `Resolved DelphiLSP:` line from `$DELPHI_LSP_SHIM_LOG` (if set) to verify what's running.
+Filters to this Claude Code session's shim — concurrent Claude Code sessions can have different runtime overrides without interfering.
 
-7. After signaling, retry the LSP query that prompted this command. The recycle is asynchronous; give DelphiLSP a moment to re-index before the first retry.
-
-If no shim is registered for the current workspace, tell the user the LSP server isn't running for this workspace yet - the override file will be picked up on the next spawn.
+After the command, retry the LSP query that prompted it. The recycle is asynchronous; give DelphiLSP a moment to re-index before the first retry.
