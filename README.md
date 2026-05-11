@@ -37,6 +37,32 @@ claude --plugin-dir ./delphi-lsp-claude
 
 Either way, `bin/delphi-lsp-shim.exe` ships precompiled — no Delphi compiler needed to run, only to rebuild (see [Building](#building)).
 
+## One-time permissions setup
+
+Claude Code's slash commands run the bundled shim via inline shell execution (`` !`...` `` preprocessing). By default, Claude Code's permission system treats this as a bash invocation and either prompts you per-call or — under `defaultMode: "auto"` — has the safety classifier deny it. You only see the failure once invocations like `/delphi-status` or `/delphi-project` return `Shell command permission check failed`.
+
+Add one allow rule to fix it permanently. Two equivalent options:
+
+**(a) Ask Claude:** run `/update-config` in any Claude Code session and tell it:
+
+> Add `Bash(*delphi-lsp-shim*)` to my permissions allow list.
+
+It edits the right `settings.json` for you.
+
+**(b) Edit `~/.claude/settings.json` directly:** add the rule to your user-level settings so it applies in every workspace. Merge with whatever you already have under `permissions.allow`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(*delphi-lsp-shim*)"
+    ]
+  }
+}
+```
+
+(For just one project, use `.claude/settings.json` in the project root, or `.claude/settings.local.json` for an un-committed per-developer override.) After this, the slash commands run inline with no per-call prompts.
+
 ## Per-project `.delphilsp.json`
 
 DelphiLSP needs a `.delphilsp.json` settings file per project (search paths, conditional defines, platform/config target). Without it, the server runs syntactic-only — no semantic queries, no diagnostics.
@@ -132,6 +158,20 @@ build.bat
 Picks the highest installed RAD Studio (`C:\Program Files (x86)\Embarcadero\Studio\<X.Y>\` with `bin\dcc64.exe` + `bin\rsvars.bat`); override via `BDS_VERSION=37.0`. Output: `bin\delphi-lsp-shim.exe` — statically linked, no runtime dependencies beyond `DelphiLSP.exe` itself. Compile time ~0.1s.
 
 If the shim is currently running, rename `bin\delphi-lsp-shim.exe` to `bin\delphi-lsp-shim.exe.inuse` first; the `.exe.inuse*` pattern is gitignored. (Or just run `/delphi-shim-reload` from inside Claude Code — exits the shim and Claude Code auto-respawns it lazily on the next LSP query, picking up whatever binary is on disk now.)
+
+## Troubleshooting
+
+**`/delphi-*` returns `Shell command permission check failed for pattern "!CLAUDE_PLUGIN_DATA=..."`** — see [One-time permissions setup](#one-time-permissions-setup). Claude Code's `auto` permission mode classifier denies the inline shell invocation unless an explicit `Bash(*delphi-lsp-shim*)` allow rule is in your settings. The `Skill(update-config)` slash command can add it for you.
+
+**`LSP(operation: hover, ...)` returns `No LSP server available for file type: .pas`** — the plugin isn't loaded for this workspace. If you installed via the bundled marketplace, the plugin only activates in projects where it's been enabled (`/plugin install delphi-lsp@jareddavison`). For local development, launch Claude Code with `--plugin-dir <path-to-this-repo>` so the plugin loads regardless of project-scope.
+
+**`/delphi-status` reports `Shims: none registered for this workspace`** even after an LSP query — likely a session-id mismatch between the shim and the slash-command shim. Confirm both processes resolved the same Claude session id by setting `DELPHI_LSP_SHIM_LOG=<path>` in the env and inspecting the log. The `[MINE]` marker in `/delphi-status` flags shims whose `claude-session.txt` matches the current command's resolved session.
+
+**Hover returns `No hover information available`** repeatedly — the cursor isn't on a symbol at the line/character you specified, or DelphiLSP hasn't fully indexed yet. Try `LSP(operation: documentSymbol, file: ...)` first to find the exact line/char of a symbol, then hover that position. On a freshly-indexed large project, give DelphiLSP a few seconds before the first query.
+
+**`/delphi-project DemoName` returns `Could not resolve to a .delphilsp.json`** — the name didn't match any `*<DemoName>*.delphilsp.json` in the workspace. Run `/delphi-status` to see what files are available, then pass an absolute path or a more distinctive substring.
+
+**More general LSP weirdness** — try `/delphi-reload` to recycle DelphiLSP. If a fresh build of the shim isn't being picked up, `/delphi-shim-reload` kills the shim process so Claude Code respawns it lazily from disk.
 
 ## License & trademarks
 
