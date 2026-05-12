@@ -196,7 +196,18 @@ begin
         DiagVerbose('  body=' + Json);
     end
     else
+    begin
       DiagVerbose('reader<-child: response len=' + IntToStr(Length(Json)));
+      // Dump response body too — capped to 2KB so workspace/symbol-style
+      // huge responses don't flood the log. Lets triage distinguish a
+      // semantic-rich documentSymbol response (signatures with types)
+      // from a syntactic-only one (bare identifiers).
+      if Length(Json) > 2000 then
+        DiagVerbose('  body=' + Copy(Json, 1, 2000) +
+          Format(' [+%d more chars]', [Length(Json) - 2000]))
+      else
+        DiagVerbose('  body=' + Json);
+    end;
     if ShouldDrop(Json) then Continue;
     if not FToClient.WriteMessage(Json) then Break;
   end;

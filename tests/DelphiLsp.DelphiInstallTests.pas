@@ -39,8 +39,9 @@ type
     // FindDelphiLspExeUnder — file existence based
     [Test] procedure FindExe_ReturnsEmptyForBlankRoot;
     [Test] procedure FindExe_ReturnsEmptyWhenNeitherExists;
-    [Test] procedure FindExe_PrefersBin64WhenBothExist;
+    [Test] procedure FindExe_PrefersBin32WhenBothExist;
     [Test] procedure FindExe_FallsBackToBinWhenOnly32BitExists;
+    [Test] procedure FindExe_FallsBackToBin64WhenOnly64BitExists;
 
     // FindBdsRootDir / FindHighestBdsVersion / CollectBdsVersionsFrom
     // are registry-walking; can't test deterministically without a real
@@ -205,7 +206,7 @@ begin
   Assert.AreEqual('', FindDelphiLspExeUnder(FRoot));
 end;
 
-procedure TDelphiInstallTests.FindExe_PrefersBin64WhenBothExist;
+procedure TDelphiInstallTests.FindExe_PrefersBin32WhenBothExist;
 var
   Bin64Path, Bin32Path: string;
 begin
@@ -216,8 +217,9 @@ begin
   TDirectory.CreateDirectory(ExtractFilePath(Bin32Path));
   TFile.WriteAllText(Bin64Path, 'fake');
   TFile.WriteAllText(Bin32Path, 'fake');
-  // Default behavior (no DELPHI_LSP_BITS): prefer bin64.
-  Assert.AreEqual(Bin64Path, FindDelphiLspExeUnder(FRoot));
+  // Default behavior (no DELPHI_LSP_BITS): prefer bin32 since Embarcadero's
+  // 64-bit DelphiLSP currently drops diagnostics (RSS-5400, Delphi 13.1).
+  Assert.AreEqual(Bin32Path, FindDelphiLspExeUnder(FRoot));
 end;
 
 procedure TDelphiInstallTests.FindExe_FallsBackToBinWhenOnly32BitExists;
@@ -228,6 +230,19 @@ begin
   TDirectory.CreateDirectory(ExtractFilePath(Bin32Path));
   TFile.WriteAllText(Bin32Path, 'fake');
   Assert.AreEqual(Bin32Path, FindDelphiLspExeUnder(FRoot));
+end;
+
+procedure TDelphiInstallTests.FindExe_FallsBackToBin64WhenOnly64BitExists;
+var
+  Bin64Path: string;
+begin
+  // With 32-bit absent, the fallback path picks 64-bit even though it's
+  // the deprioritised one — better than nothing for users on a 64-bit-only
+  // SKU. Loud diagnostic-loss is now a known limitation, not a bug.
+  Bin64Path := IncludeTrailingPathDelimiter(FRoot) + 'bin64\DelphiLSP.exe';
+  TDirectory.CreateDirectory(ExtractFilePath(Bin64Path));
+  TFile.WriteAllText(Bin64Path, 'fake');
+  Assert.AreEqual(Bin64Path, FindDelphiLspExeUnder(FRoot));
 end;
 
 { FindBdsRootDir / FindHighestBdsVersion — registry-driven, sanity-only }

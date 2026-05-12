@@ -48,3 +48,7 @@ Thumbs.db
 
 # Local-only resume / hand-off notes
 NEXT_SESSION_PROMPT.md
+
+# Per-machine Claude Code config (settings.local.json, etc.). Project-level
+# .claude/settings.json that the team would want to share is not used here.
+.claude/

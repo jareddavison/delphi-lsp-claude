@@ -9,6 +9,18 @@
 // installs. Each version's `RootDir` value gives the install root, under
 // which `bin\DelphiLSP.exe` (32-bit) or `bin64\DelphiLSP.exe` (64-bit,
 // higher-tier SKUs) lives.
+//
+// Bitness preference: defaults to 32-bit when both are installed because
+// Embarcadero's 64-bit DelphiLSP currently has a bug that suppresses
+// compiler-error diagnostics. Logged with Embarcadero as RSS-5400
+// ("CodeInsight LSP Compiler errors do not work with 'Use 64-bit version
+// of the server'"):
+//   https://embt.atlassian.net/servicedesk/customer/portal/1/RSS-5400
+// The shim reproduces this: under bin64\DelphiLSP.exe,
+// textDocument/publishDiagnostics arrives with an empty diagnostics
+// array even for hard parse errors; under bin\DelphiLSP.exe, the same
+// source produces proper E2125/E2029-style diagnostics. Override with
+// DELPHI_LSP_BITS=64 to deliberately use the 64-bit version anyway.
 
 unit DelphiLsp.DelphiInstall;
 
@@ -19,12 +31,13 @@ uses
   System.Classes;
 
 // Pick which DelphiLSP.exe to spawn under a given BDS install root.
-// Default behaviour: prefer 64-bit, fall back to 32-bit. Override via
-// the DELPHI_LSP_BITS env var:
+// Default behaviour: prefer 32-bit, fall back to 64-bit (see unit doc
+// for the RSS-5400 background — 64-bit silently drops diagnostics as
+// of Delphi 13.1). Override via the DELPHI_LSP_BITS env var:
 //   DELPHI_LSP_BITS=32  — only consider 32-bit (bin\DelphiLSP.exe)
 //   DELPHI_LSP_BITS=64  — only consider 64-bit (bin64\DelphiLSP.exe);
 //                         fail loudly via Diag if missing
-//   (unset/empty/other) — 64-then-32 fallback
+//   (unset/empty/other) — 32-then-64 fallback
 // Returns '' if no candidate satisfies the preference.
 function FindDelphiLspExeUnder(const BdsRoot: string): string;
 
@@ -91,8 +104,11 @@ begin
       Diag('DELPHI_LSP_BITS=64 but 64-bit DelphiLSP.exe not found under ' + BdsRoot);
     Exit;
   end;
-  if FileExists(Bin64Path) then Exit(Bin64Path);
+  // Default: prefer 32-bit (RSS-5400 — 64-bit DelphiLSP.exe currently
+  // returns empty diagnostics arrays as of Delphi 13.1). Falls through
+  // to 64-bit only if 32-bit isn't installed.
   if FileExists(Bin32Path) then Exit(Bin32Path);
+  if FileExists(Bin64Path) then Exit(Bin64Path);
 end;
 
 function CompareBdsVersions(const A, B: string): Integer;

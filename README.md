@@ -129,7 +129,7 @@ Cleanup:
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
 | `DELPHI_LSP_EXE` | *(auto-detect)* | Path or PATH name of `DelphiLSP.exe`. Highest BDS version is auto-resolved via registry; this overrides. |
-| `DELPHI_LSP_BITS` | *(prefer 64)* | Force a specific DelphiLSP variant when both `<install>\bin64\` and `<install>\bin\` exist. `32` selects 32-bit, `64` selects 64-bit (fails loudly if missing rather than falling back), unset selects 64-then-32. Doesn't apply when `DELPHI_LSP_EXE` is set explicitly. |
+| `DELPHI_LSP_BITS` | *(prefer 32)* | Force a specific DelphiLSP variant when both `<install>\bin64\` and `<install>\bin\` exist. `32` selects 32-bit, `64` selects 64-bit (fails loudly if missing rather than falling back), unset selects 32-then-64. The default flipped from 64-then-32 in response to [RSS-5400](https://embt.atlassian.net/servicedesk/customer/portal/1/RSS-5400) — see Troubleshooting. Doesn't apply when `DELPHI_LSP_EXE` is set explicitly. |
 | `DELPHI_LSP_LOG_MODES` | `0` | Bitmask passed to `-LogModes`. |
 | `DELPHI_LSP_SERVER_TYPE` | `controller` | `controller` \| `agent` \| `linter` (controller spawns sub-process agents; non-controller modes don't push diagnostics). |
 | `DELPHI_LSP_AGENT_COUNT` | `2` | 1 or 2 (controller mode only; ≥2 enables Error Insight push diagnostics). |
@@ -172,6 +172,8 @@ If the shim is currently running, rename `bin\delphi-lsp-shim.exe` to `bin\delph
 **`/delphi-project DemoName` returns `Could not resolve to a .delphilsp.json`** — the name didn't match any `*<DemoName>*.delphilsp.json` in the workspace. Run `/delphi-status` to see what files are available, then pass an absolute path or a more distinctive substring.
 
 **More general LSP weirdness** — try `/delphi-reload` to recycle DelphiLSP. If a fresh build of the shim isn't being picked up, `/delphi-shim-reload` kills the shim process so Claude Code respawns it lazily from disk.
+
+**Compile errors don't reach the model (empty `publishDiagnostics`)** — known limitation in Embarcadero's 64-bit `DelphiLSP.exe` as of Delphi 13.1. The 64-bit server emits `publishDiagnostics` notifications with an empty `diagnostics: []` array even for hard parse errors; the 32-bit server (`<install>\bin\DelphiLSP.exe`) emits proper `E2xxx`-coded diagnostics on the same input. Bug logged with Embarcadero as [**RSS-5400** — "CodeInsight LSP Compiler errors do not work with 'Use 64-bit version of the server'"](https://embt.atlassian.net/servicedesk/customer/portal/1/RSS-5400). The shim defaults to 32-bit when both are installed; set `DELPHI_LSP_BITS=64` to force the 64-bit binary anyway (and accept the diagnostic loss). When Embarcadero ships a fix, this default can be reversed.
 
 ## License & trademarks
 

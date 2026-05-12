@@ -93,6 +93,11 @@ function Invoke-HaikuClaude {
     $keysToRemove = @($psi.Environment.Keys) | Where-Object { $_ -like 'CLAUDE_*' -or $_ -like 'CLAUDECODE*' }
     foreach ($k in $keysToRemove) { [void]$psi.Environment.Remove($k) }
     $psi.Environment['DELPHI_LSP_SHIM_LOG'] = $ShimLog
+    # Verbose body dumps include the full publishDiagnostics JSON, which is
+    # what the diagnostics-roundtrip test asserts on. Cheap to leave on for
+    # every test — the log is only consulted on failure, and triage benefits
+    # from seeing the full LSP message stream regardless of which test broke.
+    $psi.Environment['DELPHI_LSP_VERBOSE'] = '1'
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $p  = [System.Diagnostics.Process]::Start($psi)
